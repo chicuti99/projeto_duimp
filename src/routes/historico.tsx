@@ -121,12 +121,16 @@ function HistoricoPage() {
                     {visibleItems.map((item, index) => (
                       <div
                         key={item.id}
-                        className="rounded-lg border border-border/60 bg-muted/20 px-4 py-3 text-sm text-foreground"
+                        role="button"
+                        tabIndex={0}
+                        className="group cursor-pointer rounded-lg border border-border/60 bg-muted/20 px-4 py-3 text-sm text-foreground transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/30 hover:bg-accent/10 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-primary/30"
                       >
-                        <span className="mr-2 text-xs font-medium text-muted-foreground">
+                        <span className="mr-2 text-xs font-medium text-muted-foreground transition-colors group-hover:text-primary">
                           {String((page - 1) * ITEMS_PER_PAGE + index + 1).padStart(2, "0")}
                         </span>
-                        {item.query?.trim() || "Consulta não informada"}
+                        <span className="transition-colors group-hover:text-primary">
+                          {item.query?.trim() || "Consulta não informada"}
+                        </span>
                       </div>
                     ))}
                   </div>

@@ -1,8 +1,16 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useLocation } from "@tanstack/react-router";
 import { NcmClassifier } from "@/components/NcmClassifier";
 import { BatchClassifier } from "@/components/BatchClassifier";
 import { Toaster } from "@/components/ui/sonner";
-import { ShieldCheck } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Menu, ShieldCheck } from "lucide-react";
 
 export const Route = createFileRoute("/classificacao")({
   component: ClassificacaoPage,
@@ -18,16 +26,47 @@ export const Route = createFileRoute("/classificacao")({
 });
 
 function ClassificacaoPage() {
+  const location = useLocation();
+
   return (
     <div className="min-h-screen bg-background">
       <Toaster richColors position="top-center" />
 
       <header className="border-b border-border/60 bg-background/80 backdrop-blur sticky top-0 z-10">
         <div className="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
-          <div>
-            <div className="font-bold leading-tight">FC Comércio Exterior</div>
-            <div className="text-xs text-muted-foreground leading-tight">
-              Classificação fiscal • LI • DUIMP
+          <div className="flex items-center gap-3">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" className="rounded-full" aria-label="Abrir menu">
+                  <Menu className="h-5 w-5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-56">
+                <DropdownMenuLabel>Menu</DropdownMenuLabel>
+                <DropdownMenuItem asChild>
+                  <Link
+                    to="/classificacao"
+                    className={location.pathname === "/classificacao" ? "font-medium" : ""}
+                  >
+                    Classificar
+                  </Link>
+                </DropdownMenuItem>
+                <DropdownMenuItem asChild>
+                  <Link
+                    to="/historico"
+                    className={location.pathname === "/historico" ? "font-medium" : ""}
+                  >
+                    Historico
+                  </Link>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+
+            <div>
+              <div className="font-bold leading-tight">FC Comércio Exterior</div>
+              <div className="text-xs text-muted-foreground leading-tight">
+                Classificação fiscal • LI • DUIMP
+              </div>
             </div>
           </div>
           <Link to="/" className="text-sm text-primary underline-offset-4 hover:underline">

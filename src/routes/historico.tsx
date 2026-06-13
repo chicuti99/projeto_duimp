@@ -1,8 +1,15 @@
+import { useEffect, useMemo, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Toaster } from "@/components/ui/sonner";
-import { History } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import type { Tables } from "@/integrations/supabase/types";
+import { ChevronLeft, ChevronRight, History, Loader2 } from "lucide-react";
+
+const ITEMS_PER_PAGE = 10;
+
+type SearchRow = Tables<"ncm_searches">;
 
 export const Route = createFileRoute("/historico")({
   component: HistoricoPage,
@@ -18,6 +25,54 @@ export const Route = createFileRoute("/historico")({
 });
 
 function HistoricoPage() {
+  const [items, setItems] = useState<SearchRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [page, setPage] = useState(1);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadHistorico() {
+      setLoading(true);
+      setError("");
+
+      const { data, error } = await supabase
+        .from("ncm_searches")
+        .select("id, query, created_at")
+        .order("created_at", { ascending: false, nullsFirst: false })
+        .order("id", { ascending: false });
+
+      if (cancelled) return;
+
+      if (error) {
+        setError("Não foi possível carregar o histórico.");
+        setItems([]);
+      } else {
+        setItems((data ?? []) as SearchRow[]);
+      }
+
+      setLoading(false);
+    }
+
+    loadHistorico();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const totalPages = Math.max(1, Math.ceil(items.length / ITEMS_PER_PAGE));
+
+  useEffect(() => {
+    setPage((current) => Math.min(Math.max(current, 1), totalPages));
+  }, [totalPages]);
+
+  const visibleItems = useMemo(() => {
+    const start = (page - 1) * ITEMS_PER_PAGE;
+    return items.slice(start, start + ITEMS_PER_PAGE);
+  }, [items, page]);
+
   return (
     <div className="min-h-screen bg-background">
       <Toaster richColors position="top-center" />
@@ -43,12 +98,66 @@ function HistoricoPage() {
               </div>
               <CardTitle className="text-2xl">Histórico</CardTitle>
               <CardDescription>
-                Aqui você pode listar as classificações anteriores quando a integração estiver
-                pronta.
+                Lista das consultas salvas em ncm_searches, com até 10 itens por página.
               </CardDescription>
             </CardHeader>
-            <CardContent className="text-center text-sm text-muted-foreground">
-              Nenhum histórico foi carregado ainda.
+            <CardContent className="space-y-4">
+              {loading ? (
+                <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Carregando histórico...
+                </div>
+              ) : error ? (
+                <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
+                  {error}
+                </div>
+              ) : items.length === 0 ? (
+                <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
+                  Nenhum item encontrado em ncm_searches.
+                </div>
+              ) : (
+                <>
+                  <div className="space-y-3">
+                    {visibleItems.map((item, index) => (
+                      <div
+                        key={item.id}
+                        className="rounded-lg border border-border/60 bg-muted/20 px-4 py-3 text-sm text-foreground"
+                      >
+                        <span className="mr-2 text-xs font-medium text-muted-foreground">
+                          {String((page - 1) * ITEMS_PER_PAGE + index + 1).padStart(2, "0")}
+                        </span>
+                        {item.query?.trim() || "Consulta não informada"}
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3 pt-2">
+                    <div className="text-sm text-muted-foreground">
+                      Página {page} de {totalPages}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setPage((current) => Math.max(1, current - 1))}
+                        disabled={page <= 1}
+                      >
+                        <ChevronLeft className="h-4 w-4" />
+                        Anterior
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+                        disabled={page >= totalPages}
+                      >
+                        Próxima
+                        <ChevronRight className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                </>
+              )}
             </CardContent>
           </Card>
         </div>

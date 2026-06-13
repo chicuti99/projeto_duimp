@@ -123,8 +123,91 @@ export type Database = {
         }
         Relationships: []
       }
+
+      ncm_searches: {
+        Row: {
+          id: string
+          query: string
+          operation: string
+          natureza: string
+          atributos: Json
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          query: string
+          operation: 'importacao' | 'exportacao' | 'ambos'
+          natureza: string
+          atributos?: Json
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          query?: string
+          operation?: 'importacao' | 'exportacao' | 'ambos'
+          natureza?: string
+          atributos?: Json
+          created_at?: string
+        }
+        Relationships: []
+      }
+
+      ncm_results: {
+        Row: {
+          id: string
+          search_id: string
+          natureza_funcional: string
+          nivel_dados: string
+          confianca_maxima_permitida: string
+          analise_rgi: string
+          perguntas_obrigatorias: string[]
+          falsos_cognatos_alertados: string[]
+          sugestoes_pesquisa: string[]
+          alertas: string[]
+          classifications: Json
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          search_id: string
+          natureza_funcional: string
+          nivel_dados: string
+          confianca_maxima_permitida: string
+          analise_rgi: string
+          perguntas_obrigatorias?: string[]
+          falsos_cognatos_alertados?: string[]
+          sugestoes_pesquisa?: string[]
+          alertas?: string[]
+          classifications?: Json
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          search_id?: string
+          natureza_funcional?: string
+          nivel_dados?: string
+          confianca_maxima_permitida?: string
+          analise_rgi?: string
+          perguntas_obrigatorias?: string[]
+          falsos_cognatos_alertados?: string[]
+          sugestoes_pesquisa?: string[]
+          alertas?: string[]
+          classifications?: Json
+          created_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ncm_results_search_id_fkey"
+            columns: ["search_id"]
+            isOneToOne: false
+            referencedRelation: "ncm_searches"
+            referencedColumns: ["id"]
+          }
+        ]
+      }
     }
 
+    
     Views: {
       [_ in never]: never
     }

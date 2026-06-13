@@ -13,6 +13,7 @@ import { Route as HistoricoRouteImport } from './routes/historico'
 import { Route as ClassificacaoRouteImport } from './routes/classificacao'
 import { Route as CadastroRouteImport } from './routes/cadastro'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as HistoricoSearchIdRouteImport } from './routes/historico.$searchId'
 
 const HistoricoRoute = HistoricoRouteImport.update({
   id: '/historico',
@@ -34,39 +35,63 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const HistoricoSearchIdRoute = HistoricoSearchIdRouteImport.update({
+  id: '/$searchId',
+  path: '/$searchId',
+  getParentRoute: () => HistoricoRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/cadastro': typeof CadastroRoute
   '/classificacao': typeof ClassificacaoRoute
-  '/historico': typeof HistoricoRoute
+  '/historico': typeof HistoricoRouteWithChildren
+  '/historico/$searchId': typeof HistoricoSearchIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/cadastro': typeof CadastroRoute
   '/classificacao': typeof ClassificacaoRoute
-  '/historico': typeof HistoricoRoute
+  '/historico': typeof HistoricoRouteWithChildren
+  '/historico/$searchId': typeof HistoricoSearchIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/cadastro': typeof CadastroRoute
   '/classificacao': typeof ClassificacaoRoute
-  '/historico': typeof HistoricoRoute
+  '/historico': typeof HistoricoRouteWithChildren
+  '/historico/$searchId': typeof HistoricoSearchIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/cadastro' | '/classificacao' | '/historico'
+  fullPaths:
+    | '/'
+    | '/cadastro'
+    | '/classificacao'
+    | '/historico'
+    | '/historico/$searchId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/cadastro' | '/classificacao' | '/historico'
-  id: '__root__' | '/' | '/cadastro' | '/classificacao' | '/historico'
+  to:
+    | '/'
+    | '/cadastro'
+    | '/classificacao'
+    | '/historico'
+    | '/historico/$searchId'
+  id:
+    | '__root__'
+    | '/'
+    | '/cadastro'
+    | '/classificacao'
+    | '/historico'
+    | '/historico/$searchId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   CadastroRoute: typeof CadastroRoute
   ClassificacaoRoute: typeof ClassificacaoRoute
-  HistoricoRoute: typeof HistoricoRoute
+  HistoricoRoute: typeof HistoricoRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
@@ -99,14 +124,33 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/historico/$searchId': {
+      id: '/historico/$searchId'
+      path: '/$searchId'
+      fullPath: '/historico/$searchId'
+      preLoaderRoute: typeof HistoricoSearchIdRouteImport
+      parentRoute: typeof HistoricoRoute
+    }
   }
 }
+
+interface HistoricoRouteChildren {
+  HistoricoSearchIdRoute: typeof HistoricoSearchIdRoute
+}
+
+const HistoricoRouteChildren: HistoricoRouteChildren = {
+  HistoricoSearchIdRoute: HistoricoSearchIdRoute,
+}
+
+const HistoricoRouteWithChildren = HistoricoRoute._addFileChildren(
+  HistoricoRouteChildren,
+)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   CadastroRoute: CadastroRoute,
   ClassificacaoRoute: ClassificacaoRoute,
-  HistoricoRoute: HistoricoRoute,
+  HistoricoRoute: HistoricoRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

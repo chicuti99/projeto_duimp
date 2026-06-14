@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { Outlet,createFileRoute, Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Toaster } from "@/components/ui/sonner";
@@ -98,7 +98,7 @@ function HistoricoPage() {
               </div>
               <CardTitle className="text-2xl">Histórico</CardTitle>
               <CardDescription>
-                Lista das consultas salvas em ncm_searches, com até 10 itens por página.
+                Lista das consultas salvas.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -113,7 +113,7 @@ function HistoricoPage() {
                 </div>
               ) : items.length === 0 ? (
                 <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
-                  Nenhum item encontrado em ncm_searches.
+                  Nenhuma busca encontrada.
                 </div>
               ) : (
                 <>
@@ -170,6 +170,7 @@ function HistoricoPage() {
           </Card>
         </div>
       </main>
+      <Outlet />
     </div>
   );
 }

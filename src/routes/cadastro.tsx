@@ -16,7 +16,7 @@ export const Route = createFileRoute("/cadastro")({
       { title: "FC Comércio Exterior — Cadastro" },
       {
         name: "description",
-        content: "Criação de conta com Supabase Auth.",
+        content: "Criação de conta.",
       },
     ],
   }),

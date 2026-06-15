@@ -16,7 +16,7 @@ export const Route = createFileRoute("/")({
       { title: "FC Comércio Exterior — Login" },
       {
         name: "description",
-        content: "Acesso ao sistema com Supabase Auth.",
+        content: "Acesso ao sistema.",
       },
     ],
   }),
@@ -87,7 +87,7 @@ function LoginPage() {
         <Card className="shadow-xl border-border/60">
           <CardHeader>
             <CardTitle className="text-2xl">Login</CardTitle>
-            <CardDescription>Use seu e-mail e senha cadastrados no Supabase Auth.</CardDescription>
+            <CardDescription>Use seu e-mail e senha cadastrados.</CardDescription>
           </CardHeader>
           <CardContent>
             <form className="space-y-4" onSubmit={handleLogin}>

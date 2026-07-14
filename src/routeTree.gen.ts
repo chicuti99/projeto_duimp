@@ -9,12 +9,18 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as SimulacaoCustosRouteImport } from './routes/simulacao-custos'
 import { Route as HistoricoRouteImport } from './routes/historico'
 import { Route as ClassificacaoRouteImport } from './routes/classificacao'
 import { Route as CadastroRouteImport } from './routes/cadastro'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as HistoricoSearchIdRouteImport } from './routes/historico.$searchId'
 
+const SimulacaoCustosRoute = SimulacaoCustosRouteImport.update({
+  id: '/simulacao-custos',
+  path: '/simulacao-custos',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const HistoricoRoute = HistoricoRouteImport.update({
   id: '/historico',
   path: '/historico',
@@ -46,6 +52,7 @@ export interface FileRoutesByFullPath {
   '/cadastro': typeof CadastroRoute
   '/classificacao': typeof ClassificacaoRoute
   '/historico': typeof HistoricoRouteWithChildren
+  '/simulacao-custos': typeof SimulacaoCustosRoute
   '/historico/$searchId': typeof HistoricoSearchIdRoute
 }
 export interface FileRoutesByTo {
@@ -53,6 +60,7 @@ export interface FileRoutesByTo {
   '/cadastro': typeof CadastroRoute
   '/classificacao': typeof ClassificacaoRoute
   '/historico': typeof HistoricoRouteWithChildren
+  '/simulacao-custos': typeof SimulacaoCustosRoute
   '/historico/$searchId': typeof HistoricoSearchIdRoute
 }
 export interface FileRoutesById {
@@ -61,6 +69,7 @@ export interface FileRoutesById {
   '/cadastro': typeof CadastroRoute
   '/classificacao': typeof ClassificacaoRoute
   '/historico': typeof HistoricoRouteWithChildren
+  '/simulacao-custos': typeof SimulacaoCustosRoute
   '/historico/$searchId': typeof HistoricoSearchIdRoute
 }
 export interface FileRouteTypes {
@@ -70,6 +79,7 @@ export interface FileRouteTypes {
     | '/cadastro'
     | '/classificacao'
     | '/historico'
+    | '/simulacao-custos'
     | '/historico/$searchId'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -77,6 +87,7 @@ export interface FileRouteTypes {
     | '/cadastro'
     | '/classificacao'
     | '/historico'
+    | '/simulacao-custos'
     | '/historico/$searchId'
   id:
     | '__root__'
@@ -84,6 +95,7 @@ export interface FileRouteTypes {
     | '/cadastro'
     | '/classificacao'
     | '/historico'
+    | '/simulacao-custos'
     | '/historico/$searchId'
   fileRoutesById: FileRoutesById
 }
@@ -92,10 +104,18 @@ export interface RootRouteChildren {
   CadastroRoute: typeof CadastroRoute
   ClassificacaoRoute: typeof ClassificacaoRoute
   HistoricoRoute: typeof HistoricoRouteWithChildren
+  SimulacaoCustosRoute: typeof SimulacaoCustosRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/simulacao-custos': {
+      id: '/simulacao-custos'
+      path: '/simulacao-custos'
+      fullPath: '/simulacao-custos'
+      preLoaderRoute: typeof SimulacaoCustosRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/historico': {
       id: '/historico'
       path: '/historico'
@@ -151,6 +171,7 @@ const rootRouteChildren: RootRouteChildren = {
   CadastroRoute: CadastroRoute,
   ClassificacaoRoute: ClassificacaoRoute,
   HistoricoRoute: HistoricoRouteWithChildren,
+  SimulacaoCustosRoute: SimulacaoCustosRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

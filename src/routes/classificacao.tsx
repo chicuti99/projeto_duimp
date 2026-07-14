@@ -37,7 +37,12 @@ function ClassificacaoPage() {
           <div className="flex items-center gap-3">
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon" className="rounded-full" aria-label="Abrir menu">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="rounded-full"
+                  aria-label="Abrir menu"
+                >
                   <Menu className="h-5 w-5" />
                 </Button>
               </DropdownMenuTrigger>
@@ -46,7 +51,11 @@ function ClassificacaoPage() {
                 <DropdownMenuItem asChild>
                   <Link
                     to="/classificacao"
-                    className={location.pathname === "/classificacao" ? "font-medium" : ""}
+                    className={
+                      location.pathname === "/classificacao"
+                        ? "font-medium"
+                        : ""
+                    }
                   >
                     Classificar
                   </Link>
@@ -54,32 +63,55 @@ function ClassificacaoPage() {
                 <DropdownMenuItem asChild>
                   <Link
                     to="/historico"
-                    className={location.pathname === "/historico" ? "font-medium" : ""}
+                    className={
+                      location.pathname === "/historico" ? "font-medium" : ""
+                    }
                   >
                     Historico
+                  </Link>
+                </DropdownMenuItem>
+                <DropdownMenuItem asChild>
+                  <Link
+                    to="/simulacao-custos"
+                    className={
+                      location.pathname === "/simulacao-custos"
+                        ? "font-medium"
+                        : ""
+                    }
+                  >
+                    Simulação de custos
                   </Link>
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
 
             <div>
-              <div className="font-bold leading-tight">FC Comércio Exterior</div>
+              <div className="font-bold leading-tight">
+                FC Comércio Exterior
+              </div>
               <div className="text-xs text-muted-foreground leading-tight">
                 Classificação fiscal • LI • DUIMP
               </div>
             </div>
           </div>
-          <Link to="/" className="text-sm text-primary underline-offset-4 hover:underline">
+          <Link
+            to="/"
+            className="text-sm text-primary underline-offset-4 hover:underline"
+          >
             sair
           </Link>
         </div>
       </header>
 
       <main>
-        <section className="px-4 pt-16 pb-12" style={{ backgroundImage: "var(--gradient-subtle)" }}>
+        <section
+          className="px-4 pt-16 pb-12"
+          style={{ backgroundImage: "var(--gradient-subtle)" }}
+        >
           <div className="max-w-4xl mx-auto text-center mb-10">
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-accent/10 text-accent text-sm font-medium mb-5">
-              <ShieldCheck className="h-4 w-4" /> Alinhado ao Siscomex e órgãos anuentes
+              <ShieldCheck className="h-4 w-4" /> Alinhado ao Siscomex e órgãos
+              anuentes
             </div>
             <h1 className="text-4xl md:text-6xl font-bold tracking-tight mb-5">
               Consulta NCM, LI e DUIMP{" "}
@@ -88,8 +120,8 @@ function ClassificacaoPage() {
               </span>
             </h1>
             <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
-              Descreva o produto e receba sugestões de NCM, descrição padrão para LI e Catálogo
-              DUIMP, alíquotas e alertas de anuência.
+              Descreva o produto e receba sugestões de NCM, descrição padrão
+              para LI e Catálogo DUIMP, alíquotas e alertas de anuência.
             </p>
           </div>
 

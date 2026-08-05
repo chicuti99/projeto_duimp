@@ -7,12 +7,13 @@
   // não pra fonte TS crua (src/server.ts) — o plugin @cloudflare/vite-plugin resolve
   // os módulos virtuais do TanStack Start (#tanstack-router-entry etc.) só durante o
   // build do Vite; o esbuild do wrangler sozinho não sabe resolvê-los.
+  //
+  // Deixamos o wrangler empacotar normalmente (sem no_bundle) — o output do vite
+  // ainda depende de um alias interno do TanStack Start (import "h3-v2", mapeado via
+  // "imports" no package.json dele pro pacote real h3@2). O esbuild do wrangler
+  // resolve esse alias certinho a partir do node_modules; em modo no_bundle isso
+  // fica como um import externo sem runtime pra resolver e quebra em produção.
   "main": "dist/server/server.js",
-  // O build já produz JS puro em múltiplos chunks com imports relativos entre si —
-  // não deixamos o wrangler tentar re-empacotar (isso quebraria os imports relativos
-  // e a resolução dos chunks das rotas).
-  "no_bundle": true,
-  "rules": [{ "type": "ESModule", "globs": ["**/*.js", "**/*.mjs"] }],
   "assets": {
     "directory": "dist/client",
   },

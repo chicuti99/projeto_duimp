@@ -1,7 +1,25 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "tanstack-start-app",
+  "name": "projeto-duimp",
   "compatibility_date": "2025-09-24",
   "compatibility_flags": ["nodejs_compat"],
-  "main": "src/server.ts",
+  // Aponta direto pro bundle já compilado pelo `vite build` (dist/server/server.js),
+  // não pra fonte TS crua (src/server.ts) — o plugin @cloudflare/vite-plugin resolve
+  // os módulos virtuais do TanStack Start (#tanstack-router-entry etc.) só durante o
+  // build do Vite; o esbuild do wrangler sozinho não sabe resolvê-los.
+  "main": "dist/server/server.js",
+  // O build já produz JS puro em múltiplos chunks com imports relativos entre si —
+  // não deixamos o wrangler tentar re-empacotar (isso quebraria os imports relativos
+  // e a resolução dos chunks das rotas).
+  "no_bundle": true,
+  "rules": [{ "type": "ESModule", "globs": ["**/*.js", "**/*.mjs"] }],
+  "assets": {
+    "directory": "dist/client",
+  },
+  // Garante que o `vite build` sempre roda antes do wrangler empacotar/validar,
+  // tanto localmente (`bun run deploy`) quanto na CI da Cloudflare (Workers Builds),
+  // que chama `wrangler deploy` direto sem passar por um script de build separado.
+  "build": {
+    "command": "bun run build",
+  },
 }

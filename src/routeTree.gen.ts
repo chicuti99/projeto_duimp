@@ -10,7 +10,9 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as SimulacaoCustosRouteImport } from './routes/simulacao-custos'
+import { Route as RedefinirSenhaRouteImport } from './routes/redefinir-senha'
 import { Route as HistoricoRouteImport } from './routes/historico'
+import { Route as EsqueciSenhaRouteImport } from './routes/esqueci-senha'
 import { Route as ClassificacaoRouteImport } from './routes/classificacao'
 import { Route as CadastroRouteImport } from './routes/cadastro'
 import { Route as IndexRouteImport } from './routes/index'
@@ -21,9 +23,19 @@ const SimulacaoCustosRoute = SimulacaoCustosRouteImport.update({
   path: '/simulacao-custos',
   getParentRoute: () => rootRouteImport,
 } as any)
+const RedefinirSenhaRoute = RedefinirSenhaRouteImport.update({
+  id: '/redefinir-senha',
+  path: '/redefinir-senha',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const HistoricoRoute = HistoricoRouteImport.update({
   id: '/historico',
   path: '/historico',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const EsqueciSenhaRoute = EsqueciSenhaRouteImport.update({
+  id: '/esqueci-senha',
+  path: '/esqueci-senha',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ClassificacaoRoute = ClassificacaoRouteImport.update({
@@ -51,7 +63,9 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/cadastro': typeof CadastroRoute
   '/classificacao': typeof ClassificacaoRoute
+  '/esqueci-senha': typeof EsqueciSenhaRoute
   '/historico': typeof HistoricoRouteWithChildren
+  '/redefinir-senha': typeof RedefinirSenhaRoute
   '/simulacao-custos': typeof SimulacaoCustosRoute
   '/historico/$searchId': typeof HistoricoSearchIdRoute
 }
@@ -59,7 +73,9 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/cadastro': typeof CadastroRoute
   '/classificacao': typeof ClassificacaoRoute
+  '/esqueci-senha': typeof EsqueciSenhaRoute
   '/historico': typeof HistoricoRouteWithChildren
+  '/redefinir-senha': typeof RedefinirSenhaRoute
   '/simulacao-custos': typeof SimulacaoCustosRoute
   '/historico/$searchId': typeof HistoricoSearchIdRoute
 }
@@ -68,7 +84,9 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/cadastro': typeof CadastroRoute
   '/classificacao': typeof ClassificacaoRoute
+  '/esqueci-senha': typeof EsqueciSenhaRoute
   '/historico': typeof HistoricoRouteWithChildren
+  '/redefinir-senha': typeof RedefinirSenhaRoute
   '/simulacao-custos': typeof SimulacaoCustosRoute
   '/historico/$searchId': typeof HistoricoSearchIdRoute
 }
@@ -78,7 +96,9 @@ export interface FileRouteTypes {
     | '/'
     | '/cadastro'
     | '/classificacao'
+    | '/esqueci-senha'
     | '/historico'
+    | '/redefinir-senha'
     | '/simulacao-custos'
     | '/historico/$searchId'
   fileRoutesByTo: FileRoutesByTo
@@ -86,7 +106,9 @@ export interface FileRouteTypes {
     | '/'
     | '/cadastro'
     | '/classificacao'
+    | '/esqueci-senha'
     | '/historico'
+    | '/redefinir-senha'
     | '/simulacao-custos'
     | '/historico/$searchId'
   id:
@@ -94,7 +116,9 @@ export interface FileRouteTypes {
     | '/'
     | '/cadastro'
     | '/classificacao'
+    | '/esqueci-senha'
     | '/historico'
+    | '/redefinir-senha'
     | '/simulacao-custos'
     | '/historico/$searchId'
   fileRoutesById: FileRoutesById
@@ -103,7 +127,9 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   CadastroRoute: typeof CadastroRoute
   ClassificacaoRoute: typeof ClassificacaoRoute
+  EsqueciSenhaRoute: typeof EsqueciSenhaRoute
   HistoricoRoute: typeof HistoricoRouteWithChildren
+  RedefinirSenhaRoute: typeof RedefinirSenhaRoute
   SimulacaoCustosRoute: typeof SimulacaoCustosRoute
 }
 
@@ -116,11 +142,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SimulacaoCustosRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/redefinir-senha': {
+      id: '/redefinir-senha'
+      path: '/redefinir-senha'
+      fullPath: '/redefinir-senha'
+      preLoaderRoute: typeof RedefinirSenhaRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/historico': {
       id: '/historico'
       path: '/historico'
       fullPath: '/historico'
       preLoaderRoute: typeof HistoricoRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/esqueci-senha': {
+      id: '/esqueci-senha'
+      path: '/esqueci-senha'
+      fullPath: '/esqueci-senha'
+      preLoaderRoute: typeof EsqueciSenhaRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/classificacao': {
@@ -170,7 +210,9 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   CadastroRoute: CadastroRoute,
   ClassificacaoRoute: ClassificacaoRoute,
+  EsqueciSenhaRoute: EsqueciSenhaRoute,
   HistoricoRoute: HistoricoRouteWithChildren,
+  RedefinirSenhaRoute: RedefinirSenhaRoute,
   SimulacaoCustosRoute: SimulacaoCustosRoute,
 }
 export const routeTree = rootRouteImport

@@ -66,6 +66,9 @@ import {
 import {
   createSimulacaoCustoItem,
   updateSimulacaoCustoItem,
+  listSimulacaoCustoItens,
+  deleteSimulacaoCustoItem,
+  type SimulacaoCustoItemRow,
 } from "@/lib/simulacao-custos.functions";
 import { lookupIcmsInterestadual } from "@/lib/icms-interestadual.functions";
 import { fetchCambio } from "@/lib/cambio.functions";
@@ -142,7 +145,6 @@ type DespesaLine = {
   fixed?: boolean;
 };
 
-const STORAGE_KEY = "fc-simulacao-custos-items";
 const HEADER_STORAGE_KEY = "fc-simulacao-custos-header";
 const DEFAULT_PIS = "2,10";
 const DEFAULT_COFINS = "9,65";
@@ -264,6 +266,15 @@ function toNumber(value: string) {
   const number = Number(normalized);
 
   return Number.isFinite(number) ? number : 0;
+}
+
+// Inverso de toNumber — formata um número vindo do banco (aliquota_ii,
+// peso, etc.) de volta pro formato "1.234,56" que os campos do formulário
+// esperam. null/undefined vira "" (campo nunca preenchido).
+function numberToFieldValue(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "";
+
+  return new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 4 }).format(value);
 }
 
 // Mantém só dígitos, ponto e vírgula nos campos numéricos (formato
@@ -519,17 +530,29 @@ const RATEIO_COLUMNS = [
   { key: "repSFob", label: "REP. S/ FOB" },
 ] as const;
 
-function hydrateStoredItem(item: Partial<CostItem>): CostItem | null {
-  if (!item.id || !item.nomeProduto) return null;
-
+// Converte uma linha de simulacao_custos_itens (banco, compartilhada entre
+// todos os usuários — mesmo padrão do histórico de NCM) pro formato que o
+// formulário usa.
+function rowToItem(row: SimulacaoCustoItemRow): CostItem {
   return {
-    ...EMPTY_ITEM,
-    ...item,
-    id: item.id,
-    nomeProduto: item.nomeProduto,
-    expanded: item.expanded ?? false,
-    pis: item.pis || DEFAULT_PIS,
-    cofins: item.cofins || DEFAULT_COFINS,
+    id: row.id,
+    dbId: row.id,
+    nomeProduto: row.nome_produto,
+    contribuinteIcms: row.contribuinte_icms ? "sim" : "nao",
+    contribuinteIpi: row.contribuinte_ipi ? "sim" : "nao",
+    ncm: row.ncm ?? "",
+    ii: numberToFieldValue(row.aliquota_ii),
+    ipi: numberToFieldValue(row.aliquota_ipi),
+    pis: row.aliquota_pis !== null ? numberToFieldValue(row.aliquota_pis) : DEFAULT_PIS,
+    cofins: row.aliquota_cofins !== null ? numberToFieldValue(row.aliquota_cofins) : DEFAULT_COFINS,
+    icms: numberToFieldValue(row.aliquota_icms),
+    antidumping: numberToFieldValue(row.antidumping),
+    peso: numberToFieldValue(row.peso),
+    quantidade: numberToFieldValue(row.quantidade),
+    fobUnit: numberToFieldValue(row.fob_unit),
+    frete: numberToFieldValue(row.frete),
+    seguro: numberToFieldValue(row.seguro),
+    expanded: false,
   };
 }
 
@@ -547,13 +570,15 @@ function SimulacaoCustosPage() {
   const lookupIcms = useServerFn(lookupIcmsInterestadual);
   const createItem = useServerFn(createSimulacaoCustoItem);
   const updateItem = useServerFn(updateSimulacaoCustoItem);
+  const listItems = useServerFn(listSimulacaoCustoItens);
+  const deleteItemRemote = useServerFn(deleteSimulacaoCustoItem);
   const exportIpi = useServerFn(exportSimulacaoIpiXlsx);
   const suggestNcm = useServerFn(suggestNcmByProductName);
   const fetchCambioRate = useServerFn(fetchCambio);
   const [items, setItems] = useState<CostItem[]>([]);
   const [form, setForm] = useState(EMPTY_ITEM);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [storageReady, setStorageReady] = useState(false);
+  const [itemsLoading, setItemsLoading] = useState(true);
   const [ncmLookupStatus, setNcmLookupStatus] = useState<
     "idle" | "loading" | "found" | "not-found" | "error"
   >("idle");
@@ -588,34 +613,28 @@ function SimulacaoCustosPage() {
   const [cambioError, setCambioError] = useState("");
   const [cambioReloadKey, setCambioReloadKey] = useState(0);
 
+  // Lista compartilhada (igual ao histórico de NCM) — carrega do Supabase
+  // em vez de localStorage, senão itens salvos num navegador não aparecem
+  // em outro (ou numa aba anônima).
+  const loadItems = () => {
+    setItemsLoading(true);
+    return listItems()
+      .then((result) => {
+        setItems(result.items.map(rowToItem));
+      })
+      .catch((error) => {
+        toast.error("Não foi possível carregar os itens salvos.", {
+          description: error instanceof Error ? error.message : undefined,
+        });
+      })
+      .finally(() => {
+        setItemsLoading(false);
+      });
+  };
+
   useEffect(() => {
-    const stored = window.localStorage.getItem(STORAGE_KEY);
-
-    if (!stored) {
-      setStorageReady(true);
-      return;
-    }
-
-    try {
-      const parsed = JSON.parse(stored) as Partial<CostItem>[];
-      const hydrated = Array.isArray(parsed)
-        ? parsed
-            .map((item) => hydrateStoredItem(item))
-            .filter((item): item is CostItem => Boolean(item))
-        : [];
-      setItems(hydrated);
-    } catch {
-      setItems([]);
-    } finally {
-      setStorageReady(true);
-    }
+    loadItems();
   }, []);
-
-  useEffect(() => {
-    if (!storageReady) return;
-
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
-  }, [items, storageReady]);
 
   useEffect(() => {
     const stored = window.localStorage.getItem(HEADER_STORAGE_KEY);
@@ -1355,6 +1374,8 @@ function SimulacaoCustosPage() {
   };
 
   const deleteItem = (id: string) => {
+    const item = items.find((current) => current.id === id);
+
     setItems((current) => current.filter((item) => item.id !== id));
     setSelectedIds((current) => {
       if (!current.has(id)) return current;
@@ -1366,6 +1387,16 @@ function SimulacaoCustosPage() {
     if (editingId === id) {
       resetForm();
     }
+
+    // Item ainda não confirmado pelo servidor (dbId ainda não voltou) —
+    // não tem o que apagar lá; só sai da lista local mesmo.
+    if (!item?.dbId) return;
+
+    deleteItemRemote({ data: { id: item.dbId } }).catch((error) => {
+      toast.error("Não foi possível excluir o produto salvo.", {
+        description: error instanceof Error ? error.message : undefined,
+      });
+    });
   };
 
   const toggleItem = (id: string) => {
@@ -1690,6 +1721,13 @@ function SimulacaoCustosPage() {
           </Card>
 
           <div className="space-y-5">
+            {itemsLoading && (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Carregando itens salvos...
+              </div>
+            )}
+
             {items.length > 0 && (
               <div className="relative">
                 <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />

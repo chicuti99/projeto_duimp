@@ -78,3 +78,60 @@ export const updateSimulacaoCustoItem = createServerFn({ method: "POST" })
 
     return { ok: true } as const;
   });
+
+export const SimulacaoCustoItemRowSchema = z.object({
+  id: z.string(),
+  nome_produto: z.string(),
+  contribuinte_icms: z.boolean(),
+  contribuinte_ipi: z.boolean(),
+  ncm: z.string().nullable(),
+  aliquota_ii: z.number().nullable(),
+  aliquota_ipi: z.number().nullable(),
+  aliquota_pis: z.number().nullable(),
+  aliquota_cofins: z.number().nullable(),
+  aliquota_icms: z.number().nullable(),
+  antidumping: z.number(),
+  peso: z.number().nullable(),
+  quantidade: z.number().nullable(),
+  fob_unit: z.number().nullable(),
+  frete: z.number().nullable(),
+  seguro: z.number().nullable(),
+});
+
+export type SimulacaoCustoItemRow = z.infer<typeof SimulacaoCustoItemRowSchema>;
+
+// Lista compartilhada entre todos os usuários — mesmo padrão já usado pelo
+// histórico de classificação NCM (ncm_searches), sem filtro por conta.
+export const listSimulacaoCustoItens = createServerFn({ method: "GET" }).handler(async () => {
+  const { data, error } = await (supabaseAdmin as any)
+    .from("simulacao_custos_itens")
+    .select(
+      "id, nome_produto, contribuinte_icms, contribuinte_ipi, ncm, aliquota_ii, aliquota_ipi, aliquota_pis, aliquota_cofins, aliquota_icms, antidumping, peso, quantidade, fob_unit, frete, seguro",
+    )
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return { items: z.array(SimulacaoCustoItemRowSchema).parse(data ?? []) };
+});
+
+const DeleteItemInputSchema = z.object({
+  id: z.string().min(1),
+});
+
+export const deleteSimulacaoCustoItem = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => DeleteItemInputSchema.parse(input))
+  .handler(async ({ data }) => {
+    const { error } = await (supabaseAdmin as any)
+      .from("simulacao_custos_itens")
+      .delete()
+      .eq("id", data.id);
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    return { ok: true } as const;
+  });

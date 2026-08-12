@@ -167,7 +167,14 @@ export const classifyNcm = createServerFn({ method: "POST" })
       throw new Error("GEMINI_API_KEY não configurada");
     }
 
-    const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+    // O SDK já reexecuta automaticamente em erros 429/5xx (até 2 vezes,
+    // por padrão) — não adicionamos retry por cima disso, só encurtamos
+    // o timeout de cada tentativa (padrão é 1 minuto) pra essa cadeia
+    // não passar de ~1,5 minuto no pior caso.
+    const ai = new GoogleGenAI({
+      apiKey: GEMINI_API_KEY,
+      httpOptions: { timeout: 30_000 },
+    });
 
     // CORREÇÃO 2: Adicionamos comandos diretos no systemPrompt reforçando as regras do Zod
     // para blindar contra desvios de letras maiúsculas/acentos nos Enums.
@@ -281,9 +288,9 @@ Gere sempre a estrutura de chaves acima para cada item de classificação. Nunca
           responseSchema: geminiResponseSchema as any,
           // CORREÇÃO 3: Fixamos a temperatura baixa. Em tarefas de JSON estrito,
           // valores baixos diminuem as chances do modelo quebrar a estrutura.
-          temperature: 0.0, 
+          temperature: 0.0,
           thinkingConfig: {
-            thinkingBudget: 1024, 
+            thinkingBudget: 1024,
           },
         },
       });
@@ -340,6 +347,9 @@ Gere sempre a estrutura de chaves acima para cada item de classificação. Nunca
       if (error?.status === 429) {
         throw new Error("Limite de requisições atingido na API do Gemini. Aguarde um momento.");
       }
-      throw new Error(`Erro na execução do motor aduaneiro Gemini111: ${error.message || error}`);
+      if (error?.status === 503) {
+        throw new Error("O serviço de IA está sobrecarregado no momento. Tente novamente em instantes.");
+      }
+      throw new Error(`Erro na classificação de NCM: ${error.message || error}`);
     }
   });

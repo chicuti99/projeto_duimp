@@ -63,7 +63,10 @@ import {
   lookupNcmTributos,
   type NcmTributoLookup,
 } from "@/lib/ncm-tributos.functions";
-import { createSimulacaoCustoItem } from "@/lib/simulacao-custos.functions";
+import {
+  createSimulacaoCustoItem,
+  updateSimulacaoCustoItem,
+} from "@/lib/simulacao-custos.functions";
 import { lookupIcmsInterestadual } from "@/lib/icms-interestadual.functions";
 import { fetchCambio } from "@/lib/cambio.functions";
 import { exportSimulacaoIpiXlsx } from "@/lib/simulacao-ipi-export.functions";
@@ -110,6 +113,9 @@ type SimulacaoHeader = {
 
 type CostItem = {
   id: string;
+  // id da linha em simulacao_custos_itens no Supabase, quando o item já foi
+  // persistido — undefined pra itens que só existem localmente ainda.
+  dbId?: string;
   nomeProduto: string;
   contribuinteIcms: SimNao;
   contribuinteIpi: SimNao;
@@ -540,6 +546,7 @@ function SimulacaoCustosPage() {
   const lookupTributos = useServerFn(lookupNcmTributos);
   const lookupIcms = useServerFn(lookupIcmsInterestadual);
   const createItem = useServerFn(createSimulacaoCustoItem);
+  const updateItem = useServerFn(updateSimulacaoCustoItem);
   const exportIpi = useServerFn(exportSimulacaoIpiXlsx);
   const suggestNcm = useServerFn(suggestNcmByProductName);
   const fetchCambioRate = useServerFn(fetchCambio);
@@ -1255,31 +1262,57 @@ function SimulacaoCustosPage() {
     setNcmLookupDescription("");
   };
 
+  const toItemPayload = (item: CostItem) => ({
+    nomeProduto: item.nomeProduto,
+    contribuinteIcms: item.contribuinteIcms === "sim",
+    contribuinteIpi: item.contribuinteIpi === "sim",
+    ncm: item.ncm || undefined,
+    aliquotaIi: item.ii ? toNumber(item.ii) : undefined,
+    aliquotaIpi: item.ipi ? toNumber(item.ipi) : undefined,
+    aliquotaPis: item.pis ? toNumber(item.pis) : undefined,
+    aliquotaCofins: item.cofins ? toNumber(item.cofins) : undefined,
+    aliquotaIcms: item.icms ? toNumber(item.icms) : undefined,
+    antidumping: toNumber(item.antidumping),
+    peso: toNumber(item.peso),
+    quantidade: toNumber(item.quantidade),
+    fobUnit: toNumber(item.fobUnit),
+    frete: toNumber(item.frete),
+    seguro: toNumber(item.seguro),
+  });
+
   const persistNewItem = (item: CostItem) => {
-    createItem({
-      data: {
-        nomeProduto: item.nomeProduto,
-        contribuinteIcms: item.contribuinteIcms === "sim",
-        contribuinteIpi: item.contribuinteIpi === "sim",
-        ncm: item.ncm || undefined,
-        aliquotaIi: item.ii ? toNumber(item.ii) : undefined,
-        aliquotaIpi: item.ipi ? toNumber(item.ipi) : undefined,
-        aliquotaPis: item.pis ? toNumber(item.pis) : undefined,
-        aliquotaCofins: item.cofins ? toNumber(item.cofins) : undefined,
-        aliquotaIcms: item.icms ? toNumber(item.icms) : undefined,
-        antidumping: toNumber(item.antidumping),
-        peso: toNumber(item.peso),
-        quantidade: toNumber(item.quantidade),
-        fobUnit: toNumber(item.fobUnit),
-        frete: toNumber(item.frete),
-        seguro: toNumber(item.seguro),
-      },
-    })
-      .then(() => {
+    createItem({ data: toItemPayload(item) })
+      .then((result) => {
+        // Guarda o id gerado pelo Supabase no item local, pra edições
+        // seguintes saberem qual linha atualizar em vez de criar outra.
+        setItems((current) =>
+          current.map((existingItem) =>
+            existingItem.id === item.id ? { ...existingItem, dbId: result.id } : existingItem,
+          ),
+        );
         toast.success("Produto salvo.");
       })
       .catch((error) => {
         toast.error("Não foi possível salvar o produto.", {
+          description: error instanceof Error ? error.message : undefined,
+        });
+      });
+  };
+
+  const persistItemUpdate = (item: CostItem) => {
+    // Item editado nunca chegou a ser persistido antes (ex.: criado antes
+    // desse fix) — trata como criação, já que não existe linha pra atualizar.
+    if (!item.dbId) {
+      persistNewItem(item);
+      return;
+    }
+
+    updateItem({ data: { id: item.dbId, ...toItemPayload(item) } })
+      .then(() => {
+        toast.success("Produto atualizado.");
+      })
+      .catch((error) => {
+        toast.error("Não foi possível atualizar o produto.", {
           description: error instanceof Error ? error.message : undefined,
         });
       });
@@ -1291,13 +1324,15 @@ function SimulacaoCustosPage() {
     if (!trimmedName) return;
 
     if (editingId) {
+      let updatedItem: CostItem | undefined;
       setItems((current) =>
-        current.map((item) =>
-          item.id === editingId
-            ? { ...item, ...form, nomeProduto: trimmedName }
-            : item,
-        ),
+        current.map((item) => {
+          if (item.id !== editingId) return item;
+          updatedItem = { ...item, ...form, nomeProduto: trimmedName };
+          return updatedItem;
+        }),
       );
+      if (updatedItem) persistItemUpdate(updatedItem);
     } else {
       const newItem: CostItem = {
         id: createId(),

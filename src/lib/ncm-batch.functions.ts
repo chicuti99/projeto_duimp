@@ -1,5 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
+import { GoogleGenAI, Type } from "@google/genai";
 
 const MAX_DESCRICAO_IA = 1800;
 
@@ -14,6 +15,9 @@ const ItemSchema = z.object({
   ncm_informado: z.string().max(20).optional().default(""),
 });
 
+// Limite por chamada à IA (contexto/tempo de resposta) — o client
+// (BatchClassifier.tsx) divide arquivos maiores em vários lotes desse
+// tamanho e chama essa função uma vez por lote.
 const InputSchema = z.object({
   itens: z.array(ItemSchema).min(1).max(50),
   operacao: z.enum(["importacao", "exportacao", "ambos"]).default("importacao"),
@@ -41,11 +45,60 @@ const ResultSchema = z.object({
 export type NcmBatchResult = z.infer<typeof ResultSchema>;
 export type NcmBatchItem = z.infer<typeof ResultItemSchema>;
 
+const geminiResponseSchema = {
+  type: Type.OBJECT,
+  properties: {
+    resumo: { type: Type.STRING },
+    resultados: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          descricao_original: { type: Type.STRING },
+          ncm_informado: { type: Type.STRING },
+          ncm_sugerido: { type: Type.STRING },
+          descricao_ncm: { type: Type.STRING },
+          confianca: { type: Type.STRING, enum: ["muito_alta", "alta", "media", "baixa"] },
+          divergencia: { type: Type.BOOLEAN },
+          ii: { type: Type.STRING },
+          ipi: { type: Type.STRING },
+          pis_cofins: { type: Type.STRING },
+          tratamento_administrativo: { type: Type.STRING },
+          observacao: { type: Type.STRING },
+        },
+        required: [
+          "descricao_original",
+          "ncm_informado",
+          "ncm_sugerido",
+          "descricao_ncm",
+          "confianca",
+          "divergencia",
+          "ii",
+          "ipi",
+          "pis_cofins",
+          "tratamento_administrativo",
+          "observacao",
+        ],
+      },
+    },
+  },
+  required: ["resultados", "resumo"],
+};
+
 export const classifyNcmBatch = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => InputSchema.parse(input))
   .handler(async ({ data }) => {
-    const LOVABLE_API_KEY = process.env.LOVABLE_API_KEY;
-    if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY não configurada");
+    const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+    if (!GEMINI_API_KEY) {
+      throw new Error("GEMINI_API_KEY não configurada");
+    }
+
+    const ai = new GoogleGenAI({
+      apiKey: GEMINI_API_KEY,
+      // Lote pode ter até 50 itens — dá mais folga que o timeout padrão
+      // (1 min) usado na classificação individual.
+      httpOptions: { timeout: 90_000 },
+    });
 
     const systemPrompt = `Você é auditor-fiscal especialista em NCM/TEC Mercosul e Siscomex. Receberá uma LISTA de itens (descrição do produto, e opcionalmente o NCM já informado pelo usuário). Para cada item:
 1. Aplique RGI 1/3/6 e identifique a NCM mais provável (8 dígitos no formato XXXX.XX.XX).
@@ -67,82 +120,34 @@ REGRAS:
 
     const userPrompt = `Operação: ${data.operacao}\nTotal de itens: ${data.itens.length}\n\nITENS:\n${lista}\n\nClassifique todos. Retorne EXATAMENTE ${data.itens.length} resultados na mesma ordem.`;
 
-    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-        tools: [
-          {
-            type: "function",
-            function: {
-              name: "retornar_lote",
-              description: "Retorna a classificação em lote",
-              parameters: {
-                type: "object",
-                properties: {
-                  resultados: {
-                    type: "array",
-                    items: {
-                      type: "object",
-                      properties: {
-                        descricao_original: { type: "string" },
-                        ncm_informado: { type: "string" },
-                        ncm_sugerido: { type: "string" },
-                        descricao_ncm: { type: "string" },
-                        confianca: { type: "string", enum: ["muito_alta", "alta", "media", "baixa"] },
-                        divergencia: { type: "boolean" },
-                        ii: { type: "string" },
-                        ipi: { type: "string" },
-                        pis_cofins: { type: "string" },
-                        tratamento_administrativo: { type: "string" },
-                        observacao: { type: "string" },
-                      },
-                      required: [
-                        "descricao_original",
-                        "ncm_informado",
-                        "ncm_sugerido",
-                        "descricao_ncm",
-                        "confianca",
-                        "divergencia",
-                        "ii",
-                        "ipi",
-                        "pis_cofins",
-                        "tratamento_administrativo",
-                        "observacao",
-                      ],
-                      additionalProperties: false,
-                    },
-                  },
-                  resumo: { type: "string" },
-                },
-                required: ["resultados", "resumo"],
-                additionalProperties: false,
-              },
-            },
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-3.5-flash",
+        contents: userPrompt,
+        config: {
+          systemInstruction: systemPrompt,
+          responseMimeType: "application/json",
+          responseSchema: geminiResponseSchema as any,
+          temperature: 0.0,
+          thinkingConfig: {
+            thinkingBudget: 1024,
           },
-        ],
-        tool_choice: { type: "function", function: { name: "retornar_lote" } },
-      }),
-    });
+        },
+      });
 
-    if (response.status === 429) throw new Error("Limite de requisições atingido. Aguarde e tente novamente.");
-    if (response.status === 402) throw new Error("Créditos de IA insuficientes. Adicione créditos no workspace Lovable.");
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Falha no gateway de IA [${response.status}]: ${text}`);
+      const responseText = response.text;
+      if (!responseText) {
+        throw new Error("Resposta da IA retornou vazia.");
+      }
+
+      return ResultSchema.parse(JSON.parse(responseText));
+    } catch (error: any) {
+      if (error?.status === 429) {
+        throw new Error("Limite de requisições atingido na API do Gemini. Aguarde um momento.");
+      }
+      if (error?.status === 503) {
+        throw new Error("O serviço de IA está sobrecarregado no momento. Tente novamente em instantes.");
+      }
+      throw new Error(`Erro na classificação em lote: ${error.message || error}`);
     }
-
-    const json = await response.json();
-    const toolCall = json.choices?.[0]?.message?.tool_calls?.[0];
-    if (!toolCall?.function?.arguments) throw new Error("Resposta da IA sem dados estruturados");
-
-    return ResultSchema.parse(JSON.parse(toolCall.function.arguments));
   });

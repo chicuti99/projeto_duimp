@@ -1,6 +1,5 @@
 import { useRef, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
-import { useMutation } from "@tanstack/react-query";
 import * as XLSX from "xlsx";
 import { Upload, Loader2, FileSpreadsheet, FileText, Download, AlertTriangle, CheckCircle2, Trash2 } from "lucide-react";
 import { classifyNcmBatch, type NcmBatchItem } from "@/lib/ncm-batch.functions";
@@ -12,8 +11,19 @@ import { toast } from "sonner";
 
 type InputRow = { descricao: string; ncm_informado: string };
 
+// Tamanho máximo aceito por chamada à IA (ncm-batch.functions.ts limita a
+// 50 no input validator). Arquivos maiores são divididos em vários lotes
+// desse tamanho e processados um atrás do outro — ver runAll().
 const MAX_BATCH = 50;
 const MAX_DESCRIPTION_CHARS = 1800;
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
 
 function normalizeRow(row: InputRow): InputRow | null {
   const normalized = row.descricao.replace(/\s+/g, " ").trim();
@@ -83,17 +93,12 @@ export function BatchClassifier() {
   const [rows, setRows] = useState<InputRow[]>([]);
   const [results, setResults] = useState<NcmBatchItem[] | null>(null);
   const [pasted, setPasted] = useState("");
+  const [isRunning, setIsRunning] = useState(false);
+  const [progress, setProgress] = useState<{ loteAtual: number; totalLotes: number; itensFeitos: number } | null>(
+    null,
+  );
   const fileRef = useRef<HTMLInputElement>(null);
   const runFn = useServerFn(classifyNcmBatch);
-
-  const mutation = useMutation({
-    mutationFn: async (itens: InputRow[]) => runFn({ data: { itens, operacao: "importacao" } }),
-    onSuccess: (d) => {
-      setResults(d.resultados);
-      toast.success(`${d.resultados.length} itens classificados`);
-    },
-    onError: (e: Error) => toast.error(e.message),
-  });
 
   async function handleFile(file: File) {
     try {
@@ -134,12 +139,39 @@ export function BatchClassifier() {
   }
 
   async function runAll() {
-    if (!rows.length) return;
-    if (rows.length > MAX_BATCH) {
-      toast.error(`Máximo ${MAX_BATCH} itens por lote. Divida o arquivo.`);
-      return;
+    if (!rows.length || isRunning) return;
+
+    const lotes = chunk(normalizeRows(rows), MAX_BATCH);
+    setResults([]);
+    setIsRunning(true);
+    setProgress({ loteAtual: 0, totalLotes: lotes.length, itensFeitos: 0 });
+
+    const acumulado: NcmBatchItem[] = [];
+
+    for (let i = 0; i < lotes.length; i++) {
+      setProgress({ loteAtual: i + 1, totalLotes: lotes.length, itensFeitos: acumulado.length });
+
+      try {
+        const resultado = await runFn({ data: { itens: lotes[i], operacao: "importacao" } });
+        acumulado.push(...resultado.resultados);
+        setResults([...acumulado]);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Erro desconhecido";
+        toast.error(
+          lotes.length > 1
+            ? `Falha no lote ${i + 1} de ${lotes.length} — ${acumulado.length} itens já classificados foram mantidos.`
+            : "Não foi possível classificar.",
+          { description: message },
+        );
+        setIsRunning(false);
+        setProgress(null);
+        return;
+      }
     }
-    mutation.mutate(normalizeRows(rows));
+
+    setIsRunning(false);
+    setProgress(null);
+    toast.success(`${acumulado.length} itens classificados${lotes.length > 1 ? ` em ${lotes.length} lotes` : ""}`);
   }
 
   function exportXlsx() {
@@ -216,15 +248,23 @@ export function BatchClassifier() {
           <div className="text-sm">
             <span className="font-medium">{rows.length}</span> itens prontos para classificar
             {rows.length > MAX_BATCH && (
-              <span className="text-destructive ml-2">(máx. {MAX_BATCH} por lote)</span>
+              <span className="text-muted-foreground ml-2">
+                (processado em {Math.ceil(rows.length / MAX_BATCH)} lotes de até {MAX_BATCH})
+              </span>
+            )}
+            {progress && (
+              <div className="text-xs text-muted-foreground mt-1">
+                Lote {progress.loteAtual} de {progress.totalLotes} — {progress.itensFeitos} de {rows.length} itens
+                classificados
+              </div>
             )}
           </div>
           <div className="flex gap-2">
-            <Button size="sm" variant="ghost" onClick={() => { setRows([]); setResults(null); }}>
+            <Button size="sm" variant="ghost" onClick={() => { setRows([]); setResults(null); }} disabled={isRunning}>
               <Trash2 className="h-4 w-4 mr-1" /> Limpar
             </Button>
-            <Button size="sm" onClick={runAll} disabled={mutation.isPending || rows.length > MAX_BATCH}>
-              {mutation.isPending ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null}
+            <Button size="sm" onClick={runAll} disabled={isRunning}>
+              {isRunning ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null}
               Classificar {rows.length}
             </Button>
           </div>

@@ -17,6 +17,26 @@ import {
 import { toast } from "sonner";
 
 type InputRow = { descricao: string; ncm_informado: string };
+type PdfTextToken = { text: string; x: number; y: number; width: number; height: number };
+type PdfTextLine = { y: number; height: number; tokens: PdfTextToken[] };
+type SpreadsheetSheetCandidate = {
+  sheetName: string;
+  rawRows: Record<string, unknown>[];
+  mappedRows: InputRow[];
+  descKey: string;
+  ncmKey: string;
+  score: number;
+  rowIds: Set<string>;
+};
+type SpreadsheetParseResult = {
+  rawRows: Record<string, unknown>[];
+  columns: string[];
+  rows: InputRow[];
+  descKey: string;
+  ncmKey: string;
+  includedSheets: string[];
+  skippedSheets: string[];
+};
 
 // Tamanho máximo aceito por chamada à IA (ncm-batch.functions.ts limita a
 // 50 no input validator). Arquivos maiores são divididos em vários lotes
@@ -30,6 +50,10 @@ const MAX_DESCRIPTION_CHARS = 1800;
 const RETRYABLE_ERROR_HINT = "sobrecarregado ou demorou demais";
 const MAX_LOTE_RETRIES = 2;
 const RETRY_DELAY_MS = 3000;
+const NCM_PATTERN = /\b(?:\d{4}\.\d{2}\.\d{2}|\d{8})\b/g;
+const SHEET_COLUMN = "Aba";
+const DETECTED_DESC_COLUMN = "Descrição detectada";
+const DETECTED_NCM_COLUMN = "NCM detectado";
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -57,6 +81,12 @@ function normalizeRows(input: InputRow[]) {
   return input.map(normalizeRow).filter((row): row is InputRow => Boolean(row));
 }
 
+function formatNcm(value: string) {
+  const digits = value.replace(/\D/g, "");
+  if (digits.length !== 8) return "";
+  return `${digits.slice(0, 4)}.${digits.slice(4, 6)}.${digits.slice(6, 8)}`;
+}
+
 // Sentinela pro <Select> de NCM — Radix não aceita SelectItem value="".
 const NONE_COLUMN = "__nenhuma__";
 
@@ -78,8 +108,19 @@ const DESCRICAO_HEADER_HINTS = [
   "discriminacao",
   "nomeproduto",
   "productname",
+  "codigo",
+  "codigoproduto",
+  "code",
+  "sku",
+  "partnumber",
+  "modelo",
+  "model",
+  "referencia",
+  "reference",
 ];
 const NCM_HEADER_HINTS = ["ncm", "nbm", "sh", "hscode", "harmonizedcode"];
+const PRODUCT_LIST_HEADER_HINTS = DESCRICAO_HEADER_HINTS.filter((hint) => hint !== "item");
+const ROW_ID_HEADER_HINTS = ["codigo", "code", "sku", "partnumber", "modelo", "model", "referencia", "reference"];
 
 function sampleColumnValues(rows: Record<string, unknown>[], key: string, limit = 40): string[] {
   const values: string[] = [];
@@ -172,6 +213,265 @@ function mapRawRows(rows: Record<string, unknown>[], descKey: string, ncmKey: st
   }));
 }
 
+function cellToText(value: unknown) {
+  if (value === null || value === undefined) return "";
+  return String(value).replace(/\s+/g, " ").trim();
+}
+
+function makeUniqueHeader(rawHeader: unknown[], width: number) {
+  const seen = new Map<string, number>();
+
+  return Array.from({ length: width }, (_, index) => {
+    const base = cellToText(rawHeader[index]) || `Coluna ${XLSX.utils.encode_col(index)}`;
+    const count = seen.get(base) ?? 0;
+    seen.set(base, count + 1);
+    return count ? `${base} ${count + 1}` : base;
+  });
+}
+
+function scoreHeaderRow(row: unknown[], followingRows: unknown[][]) {
+  const headers = row.map((cell) => normalizeHeader(cellToText(cell))).filter(Boolean);
+  if (headers.length < 2) return -Infinity;
+
+  let score = headers.length;
+  score += headers.filter((header) => PRODUCT_LIST_HEADER_HINTS.some((hint) => header.includes(hint))).length * 5;
+  score += headers.filter((header) => NCM_HEADER_HINTS.some((hint) => header.includes(hint))).length * 4;
+  score += headers.filter((header) =>
+    ["quantidade", "quantity", "qty", "preco", "price", "subtotal"].some((hint) => header.includes(hint)),
+  ).length;
+  score += followingRows.filter((nextRow) => nextRow.some((cell) => cellToText(cell))).length * 0.25;
+
+  return score;
+}
+
+function sheetToRows(sheet: XLSX.WorkSheet): Record<string, unknown>[] {
+  const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
+    header: 1,
+    defval: "",
+    blankrows: false,
+  });
+  if (!matrix.length) return [];
+
+  const width = Math.max(...matrix.map((row) => row.length));
+  let headerIndex = 0;
+  let bestScore = -Infinity;
+  const searchLimit = Math.min(matrix.length, 25);
+
+  for (let index = 0; index < searchLimit; index++) {
+    const score = scoreHeaderRow(matrix[index] ?? [], matrix.slice(index + 1, index + 6));
+    if (score > bestScore) {
+      bestScore = score;
+      headerIndex = index;
+    }
+  }
+
+  const headers = makeUniqueHeader(matrix[headerIndex] ?? [], width);
+  return matrix
+    .slice(headerIndex + 1)
+    .map((row) => {
+      const record: Record<string, unknown> = {};
+      headers.forEach((header, index) => {
+        record[header] = row[index] ?? "";
+      });
+      return record;
+    })
+    .filter((row) => Object.values(row).some((value) => cellToText(value)));
+}
+
+function hasProductColumnIntent(keys: string[]) {
+  return keys.some((key) => {
+    const header = normalizeHeader(key);
+    return PRODUCT_LIST_HEADER_HINTS.some((hint) => header.includes(hint));
+  });
+}
+
+function selectRowIdKey(keys: string[]) {
+  return (
+    keys.find((key) => {
+      const header = normalizeHeader(key);
+      return ROW_ID_HEADER_HINTS.some((hint) => header.includes(hint));
+    }) ??
+    keys.find((key) => normalizeHeader(key) === "item") ??
+    ""
+  );
+}
+
+function getCandidateRowIds(rows: Record<string, unknown>[]) {
+  const keys = Object.keys(rows[0] ?? {});
+  const idKey = selectRowIdKey(keys);
+  const values = new Set<string>();
+  if (!idKey) return values;
+
+  for (const row of rows) {
+    const value = normalizeHeader(cellToText(row[idKey]));
+    if (value) values.add(value);
+  }
+
+  return values;
+}
+
+function overlapRatio(a: Set<string>, b: Set<string>) {
+  const smaller = a.size <= b.size ? a : b;
+  const larger = a.size <= b.size ? b : a;
+  if (!smaller.size) return 0;
+
+  let overlap = 0;
+  for (const value of smaller) {
+    if (larger.has(value)) overlap += 1;
+  }
+  return overlap / smaller.size;
+}
+
+function buildSheetCandidate(sheetName: string, rawRows: Record<string, unknown>[]): SpreadsheetSheetCandidate | null {
+  const keys = Object.keys(rawRows[0] ?? {});
+  if (!keys.length || !hasProductColumnIntent(keys)) return null;
+
+  const guess = guessColumns(rawRows);
+  const mappedRows = normalizeRows(mapRawRows(rawRows, guess.descKey, guess.ncmKey));
+  if (mappedRows.length < 2) return null;
+
+  const descValues = sampleColumnValues(rawRows, guess.descKey);
+  const descScore = scoreDescricaoColumn(guess.descKey, descValues);
+  const descHeader = normalizeHeader(guess.descKey);
+  const hasStrongDescriptionHeader =
+    descHeader.includes("descr") ||
+    ["produto", "mercadoria", "productname"].some((hint) => descHeader.includes(hint));
+  const hasCodeOnlyHeader = ROW_ID_HEADER_HINTS.some((hint) => descHeader.includes(hint));
+
+  let score = Math.min(mappedRows.length, 80) * 0.25 + Math.max(0, descScore);
+  if (hasStrongDescriptionHeader) score += 8;
+  else if (hasCodeOnlyHeader) score += 2;
+  if (guess.ncmKey !== NONE_COLUMN) score += 4;
+
+  return {
+    sheetName,
+    rawRows,
+    mappedRows,
+    descKey: guess.descKey,
+    ncmKey: guess.ncmKey,
+    score,
+    rowIds: getCandidateRowIds(rawRows),
+  };
+}
+
+function parseSpreadsheetWorkbook(wb: XLSX.WorkBook): SpreadsheetParseResult {
+  const candidates = wb.SheetNames.map((sheetName) => {
+    const sheet = wb.Sheets[sheetName];
+    return sheet ? buildSheetCandidate(sheetName, sheetToRows(sheet)) : null;
+  }).filter((candidate): candidate is SpreadsheetSheetCandidate => Boolean(candidate));
+
+  const selected: SpreadsheetSheetCandidate[] = [];
+  const skippedSheets: string[] = [];
+
+  for (const candidate of [...candidates].sort((a, b) => b.score - a.score)) {
+    const duplicateOfBetterSheet = selected.some(
+      (selectedCandidate) => overlapRatio(candidate.rowIds, selectedCandidate.rowIds) >= 0.75,
+    );
+
+    if (duplicateOfBetterSheet) {
+      skippedSheets.push(candidate.sheetName);
+    } else {
+      selected.push(candidate);
+    }
+  }
+
+  const combinedRawRows = selected.flatMap((candidate) =>
+    candidate.rawRows.flatMap((row) => {
+      const detectedDescription = cellToText(row[candidate.descKey]);
+      const detectedNcm =
+        candidate.ncmKey && candidate.ncmKey !== NONE_COLUMN ? cellToText(row[candidate.ncmKey]) : "";
+      if (!normalizeRow({ descricao: detectedDescription, ncm_informado: detectedNcm })) return [];
+
+      return [
+        {
+          [DETECTED_DESC_COLUMN]: detectedDescription,
+          [DETECTED_NCM_COLUMN]: detectedNcm,
+          [SHEET_COLUMN]: candidate.sheetName,
+          ...row,
+        },
+      ];
+    }),
+  );
+  const originalColumns = Array.from(new Set(combinedRawRows.flatMap((row) => Object.keys(row))));
+  const columns = [
+    DETECTED_DESC_COLUMN,
+    DETECTED_NCM_COLUMN,
+    SHEET_COLUMN,
+    ...originalColumns.filter(
+      (column) => ![DETECTED_DESC_COLUMN, DETECTED_NCM_COLUMN, SHEET_COLUMN].includes(column),
+    ),
+  ];
+  const rows = normalizeRows(mapRawRows(combinedRawRows, DETECTED_DESC_COLUMN, DETECTED_NCM_COLUMN));
+
+  return {
+    rawRows: combinedRawRows,
+    columns,
+    rows,
+    descKey: DETECTED_DESC_COLUMN,
+    ncmKey: rows.some((row) => row.ncm_informado) ? DETECTED_NCM_COLUMN : NONE_COLUMN,
+    includedSheets: selected.map((candidate) => candidate.sheetName),
+    skippedSheets,
+  };
+}
+
+function tokenFromPdfItem(item: any): PdfTextToken | null {
+  const text = String(item?.str ?? "").replace(/\s+/g, " ").trim();
+  const transform = Array.isArray(item?.transform) ? item.transform : [];
+  const x = Number(transform[4]);
+  const y = Number(transform[5]);
+  if (!text || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+
+  const width = Number(item?.width) || Math.max(text.length * 5, 1);
+  const height = Number(item?.height) || Math.abs(Number(transform[3])) || Math.abs(Number(transform[0])) || 10;
+  return { text, x, y, width, height };
+}
+
+function buildPdfTextLines(tokens: PdfTextToken[]): string[] {
+  const lines: PdfTextLine[] = [];
+  const sorted = [...tokens].sort((a, b) => b.y - a.y || a.x - b.x);
+
+  for (const token of sorted) {
+    const tolerance = Math.max(2.5, Math.min(7, token.height * 0.55));
+    const line = lines.find((candidate) => Math.abs(candidate.y - token.y) <= tolerance);
+
+    if (line) {
+      const count = line.tokens.length;
+      line.y = (line.y * count + token.y) / (count + 1);
+      line.height = Math.max(line.height, token.height);
+      line.tokens.push(token);
+    } else {
+      lines.push({ y: token.y, height: token.height, tokens: [token] });
+    }
+  }
+
+  return lines
+    .sort((a, b) => b.y - a.y)
+    .map((line) => {
+      const ordered = line.tokens.sort((a, b) => a.x - b.x);
+      const charWidths = ordered
+        .map((token) => token.width / Math.max(token.text.length, 1))
+        .filter((value) => Number.isFinite(value) && value > 0);
+      const avgCharWidth = charWidths.length
+        ? charWidths.reduce((sum, value) => sum + value, 0) / charWidths.length
+        : 5;
+
+      let text = "";
+      let lastRight: number | null = null;
+
+      for (const token of ordered) {
+        if (lastRight !== null) {
+          const gap = token.x - lastRight;
+          if (gap > Math.max(2, avgCharWidth * 0.6) && !text.endsWith(" ")) text += " ";
+        }
+        text += token.text;
+        lastRight = Math.max(lastRight ?? token.x, token.x + token.width);
+      }
+
+      return text.replace(/\s+/g, " ").trim();
+    })
+    .filter(Boolean);
+}
+
 async function parsePdf(file: File): Promise<string> {
   // dynamic import to keep initial bundle light
   const pdfjs = await import("pdfjs-dist");
@@ -179,29 +479,203 @@ async function parsePdf(file: File): Promise<string> {
   pdfjs.GlobalWorkerOptions.workerSrc = (worker as { default: string }).default;
   const buf = await file.arrayBuffer();
   const doc = await pdfjs.getDocument({ data: buf }).promise;
-  let txt = "";
+  const pages: string[] = [];
   for (let i = 1; i <= doc.numPages; i++) {
     const page = await doc.getPage(i);
     const content = await page.getTextContent();
-    txt += content.items.map((it: any) => it.str).join(" ") + "\n";
+    const tokens = content.items.map(tokenFromPdfItem).filter((token): token is PdfTextToken => Boolean(token));
+    pages.push(buildPdfTextLines(tokens).join("\n"));
   }
-  return txt;
+  return pages.join("\n");
+}
+
+function cleanupPdfLine(line: string) {
+  return line
+    .replace(/\u00a0/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\s+([|,;:])/g, "$1")
+    .trim();
+}
+
+function isPdfNoiseLine(line: string) {
+  const normalized = normalizeHeader(line);
+  if (!normalized) return true;
+  if (["item", "description", "descricao", "ncm", "hscode"].includes(normalized)) return true;
+
+  return [
+    "commercialinvoice",
+    "comercialinvoice",
+    "proformainvoice",
+    "packinglist",
+    "address",
+    "telephone",
+    "zipcode",
+    "cnpj",
+    "vat",
+    "notify",
+    "consignee",
+    "importer",
+    "buyer",
+    "totalqty",
+    "remark",
+    "countryoforigin",
+    "incoterms",
+    "paymentconditions",
+    "thankyou",
+    "eoe",
+  ].some((hint) => normalized.includes(hint));
+}
+
+function isProductLikeDescription(value: string) {
+  const text = value.trim();
+  if (text.length < 2 || isPdfNoiseLine(text)) return false;
+  if (/^\d{1,6}$/.test(text)) return false;
+  if (/^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$/.test(text)) return false;
+  return /[A-Za-zÀ-ÿ]/.test(text);
+}
+
+function findNcmInLine(line: string) {
+  const matches = [...line.matchAll(NCM_PATTERN)]
+    .map((match) => ({
+      raw: match[0],
+      ncm: formatNcm(match[0]),
+      index: match.index ?? 0,
+    }))
+    .filter((match) => match.ncm);
+
+  if (!matches.length) return null;
+
+  const lineEnd = line.trimEnd().length;
+  const labeled = /\b(ncm|hscode|hs\s*code|nbm)\b/i.test(line);
+  const trailing = matches.filter((match) => match.index + match.raw.length >= lineEnd - 8);
+  const dotted = matches.filter((match) => match.raw.includes("."));
+
+  if (trailing.length) return trailing[trailing.length - 1];
+  if (labeled) return matches[matches.length - 1];
+  if (dotted.length) return dotted[dotted.length - 1];
+  return null;
+}
+
+function stripTableRowPrefix(value: string) {
+  return value
+    .replace(/^\s*(?:item|it\.?|no\.?|n[ºo])?\s*\d{1,6}\s*[-.)|:]?\s+/i, "")
+    .replace(/^\s*(?:description|descricao|product|produto|mercadoria)\s*[:|-]?\s*/i, "")
+    .replace(/\s*(?:ncm|hs\s*code|hscode)\s*[:|-]?\s*$/i, "")
+    .replace(/^[\s\-–—|;,.:]+|[\s\-–—|;,.:]+$/g, "")
+    .trim();
+}
+
+function dedupeRows(input: InputRow[]) {
+  const seen = new Set<string>();
+  const rows: InputRow[] = [];
+
+  for (const row of input) {
+    const key = `${row.descricao.toLowerCase()}::${row.ncm_informado}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push(row);
+  }
+
+  return rows;
+}
+
+function extractInlineTableRows(lines: string[]) {
+  const rows: InputRow[] = [];
+  let pending: InputRow | null = null;
+
+  for (const line of lines) {
+    if (isPdfNoiseLine(line)) continue;
+
+    const ncmMatch = findNcmInLine(line);
+    if (ncmMatch) {
+      const before = stripTableRowPrefix(line.slice(0, ncmMatch.index).replace(/[-–—|;,]+/g, " "));
+      const after = stripTableRowPrefix(
+        line.slice(ncmMatch.index + ncmMatch.raw.length).replace(/[-–—|;,]+/g, " "),
+      );
+      const ncmNearStart =
+        ncmMatch.index < 24 || /\b(ncm|hscode|hs\s*code|nbm)\b/i.test(line.slice(0, ncmMatch.index));
+      const desc = ncmNearStart && isProductLikeDescription(after) ? after : before;
+
+      if (isProductLikeDescription(desc)) {
+        rows.push({ descricao: desc, ncm_informado: ncmMatch.ncm });
+        pending = null;
+      } else if (pending && !pending.ncm_informado) {
+        rows.push({ ...pending, ncm_informado: ncmMatch.ncm });
+        pending = null;
+      }
+      continue;
+    }
+
+    const desc = stripTableRowPrefix(line);
+    if (!isProductLikeDescription(desc)) continue;
+
+    if (/^\s*\d{1,6}\s+/.test(line)) {
+      if (pending) rows.push(pending);
+      pending = { descricao: desc, ncm_informado: "" };
+    } else if (pending && pending.descricao.length < MAX_DESCRIPTION_CHARS * 0.8) {
+      pending = { descricao: `${pending.descricao} ${desc}`, ncm_informado: pending.ncm_informado };
+    }
+  }
+
+  if (pending) rows.push(pending);
+  return normalizeRows(rows);
+}
+
+function extractStackedColumnRows(lines: string[]) {
+  const firstNcmIndex = lines.findIndex((line) => {
+    const ncmMatch = findNcmInLine(line);
+    return Boolean(ncmMatch) && line.replace(NCM_PATTERN, "").trim().length === 0;
+  });
+  if (firstNcmIndex < 0) return [];
+
+  const descHeaderIndex = lines
+    .slice(0, firstNcmIndex)
+    .map((line, index) => ({ line, index }))
+    .reverse()
+    .find(({ line }) => ["description", "descricao", "produto", "mercadoria"].includes(normalizeHeader(line)))?.index;
+  if (descHeaderIndex === undefined) return [];
+
+  const descriptions = lines
+    .slice(descHeaderIndex + 1, firstNcmIndex)
+    .map(stripTableRowPrefix)
+    .filter(isProductLikeDescription);
+  const ncms = lines
+    .slice(firstNcmIndex)
+    .map((line) => findNcmInLine(line)?.ncm ?? "")
+    .filter(Boolean);
+
+  if (descriptions.length < 2 || ncms.length < 2) return [];
+
+  return normalizeRows(
+    descriptions.slice(0, ncms.length).map((descricao, index) => ({
+      descricao,
+      ncm_informado: ncms[index] ?? "",
+    })),
+  );
 }
 
 function textToRows(text: string): InputRow[] {
-  return text
+  const lines = text
     .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length >= 2)
-    .map((line) => {
-      // detect NCM pattern in the line
-      const m = line.match(/(\d{4}\.?\d{2}\.?\d{2})/);
-      const ncm = m ? m[1] : "";
-      const desc = ncm ? line.replace(m![0], "").replace(/[-–|;,]+/g, " ").trim() : line;
-      return { descricao: desc, ncm_informado: ncm };
-    })
-    .map(normalizeRow)
-    .filter((row): row is InputRow => Boolean(row));
+    .map(cleanupPdfLine)
+    .filter((line) => line.length >= 2);
+
+  const inlineRows = extractInlineTableRows(lines);
+  if (inlineRows.length) return dedupeRows(inlineRows);
+
+  const stackedRows = extractStackedColumnRows(lines);
+  if (stackedRows.length) return dedupeRows(stackedRows);
+
+  return dedupeRows(
+    normalizeRows(
+      lines
+        .filter(isProductLikeDescription)
+        .map((line) => ({
+          descricao: stripTableRowPrefix(line),
+          ncm_informado: findNcmInLine(line)?.ncm ?? "",
+        })),
+    ),
+  );
 }
 
 export function BatchClassifier() {
@@ -244,19 +718,21 @@ export function BatchClassifier() {
       if (name.endsWith(".xlsx") || name.endsWith(".xls") || name.endsWith(".csv")) {
         const buf = await file.arrayBuffer();
         const wb = XLSX.read(buf, { type: "array" });
-        const sheet = wb.Sheets[wb.SheetNames[0]];
-        const json = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
-        if (!json.length) {
-          toast.error("Nenhuma linha encontrada no arquivo");
+        const parsed = parseSpreadsheetWorkbook(wb);
+        if (!parsed.rawRows.length || !parsed.rows.length) {
+          toast.error("Nenhuma aba com lista de produtos foi encontrada no arquivo");
           return;
         }
-        const cols = Object.keys(json[0]);
-        const guess = guessColumns(json);
-        setRawRows(json);
-        setColumns(cols);
-        applyColumnMapping(json, guess.descKey, guess.ncmKey);
-        toast.success(`${json.length} linhas lidas do arquivo`, {
-          description: `Detectamos "${guess.descKey}" como coluna de descrição — confira/troque abaixo se não for essa.`,
+        setRawRows(parsed.rawRows);
+        setColumns(parsed.columns);
+        setDescKey(parsed.descKey);
+        setNcmKey(parsed.ncmKey);
+        setRows(parsed.rows);
+        setResults(null);
+        toast.success(`${parsed.rows.length} itens lidos de ${parsed.includedSheets.length} aba(s)`, {
+          description: `Abas usadas: ${parsed.includedSheets.join(", ")}${
+            parsed.skippedSheets.length ? ` · Abas duplicadas ignoradas: ${parsed.skippedSheets.join(", ")}` : ""
+          }`,
         });
         return;
       }

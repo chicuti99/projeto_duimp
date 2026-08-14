@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 
 const LookupInputSchema = z.object({
   ncm: z
@@ -19,6 +20,7 @@ export type NcmTributoLookup = {
 };
 
 export const lookupNcmTributos = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => LookupInputSchema.parse(input))
   .handler(async ({ data }) => {
     const { data: row, error } = await (supabaseAdmin as any)

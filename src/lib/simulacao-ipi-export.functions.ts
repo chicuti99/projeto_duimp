@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { createServerFn } from "@tanstack/react-start";
 import ExcelJS from "exceljs";
 import { z } from "zod";
+import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 
 // Réplica 1:1 das 3 abas visíveis da planilha modelo (mesmas colunas,
 // mesmas linhas/mescla de cabeçalho, mesma cor (#003870 na Rateio
@@ -1019,6 +1020,7 @@ function buildDemonstrativoSheet(
 }
 
 export const exportSimulacaoIpiXlsx = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => ExportInputSchema.parse(input))
   .handler(async ({ data }) => {
     const workbook = new ExcelJS.Workbook();

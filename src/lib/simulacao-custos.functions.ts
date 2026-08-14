@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 
 const CreateItemInputSchema = z.object({
   nomeProduto: z.string().min(1),
@@ -45,6 +46,7 @@ function toRow(data: z.infer<typeof CreateItemInputSchema>) {
 }
 
 export const createSimulacaoCustoItem = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => CreateItemInputSchema.parse(input))
   .handler(async ({ data }) => {
     const { data: row, error } = await (supabaseAdmin as any)
@@ -64,6 +66,7 @@ export const createSimulacaoCustoItem = createServerFn({ method: "POST" })
 // sem isso, clicar em "Salvar" numa edição só atualizava o estado local,
 // sem nenhuma requisição pro servidor.
 export const updateSimulacaoCustoItem = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => UpdateItemInputSchema.parse(input))
   .handler(async ({ data }) => {
     const { id, ...rest } = data;
@@ -102,26 +105,29 @@ export type SimulacaoCustoItemRow = z.infer<typeof SimulacaoCustoItemRowSchema>;
 
 // Lista compartilhada entre todos os usuários — mesmo padrão já usado pelo
 // histórico de classificação NCM (ncm_searches), sem filtro por conta.
-export const listSimulacaoCustoItens = createServerFn({ method: "GET" }).handler(async () => {
-  const { data, error } = await (supabaseAdmin as any)
-    .from("simulacao_custos_itens")
-    .select(
-      "id, nome_produto, contribuinte_icms, contribuinte_ipi, ncm, aliquota_ii, aliquota_ipi, aliquota_pis, aliquota_cofins, aliquota_icms, antidumping, peso, quantidade, fob_unit, frete, seguro",
-    )
-    .order("created_at", { ascending: false });
+export const listSimulacaoCustoItens = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async () => {
+    const { data, error } = await (supabaseAdmin as any)
+      .from("simulacao_custos_itens")
+      .select(
+        "id, nome_produto, contribuinte_icms, contribuinte_ipi, ncm, aliquota_ii, aliquota_ipi, aliquota_pis, aliquota_cofins, aliquota_icms, antidumping, peso, quantidade, fob_unit, frete, seguro",
+      )
+      .order("created_at", { ascending: false });
 
-  if (error) {
-    throw new Error(error.message);
-  }
+    if (error) {
+      throw new Error(error.message);
+    }
 
-  return { items: z.array(SimulacaoCustoItemRowSchema).parse(data ?? []) };
-});
+    return { items: z.array(SimulacaoCustoItemRowSchema).parse(data ?? []) };
+  });
 
 const DeleteItemInputSchema = z.object({
   id: z.string().min(1),
 });
 
 export const deleteSimulacaoCustoItem = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => DeleteItemInputSchema.parse(input))
   .handler(async ({ data }) => {
     const { error } = await (supabaseAdmin as any)

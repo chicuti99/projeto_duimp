@@ -48,6 +48,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { RequireAuth, AuthGuardFallback } from "@/components/RequireAuth";
 import { Toaster } from "@/components/ui/sonner";
 import {
   Table,
@@ -250,6 +251,10 @@ const EMPTY_ITEM: Omit<CostItem, "id" | "expanded"> = {
 
 export const Route = createFileRoute("/simulacao-custos")({
   component: SimulacaoCustosPage,
+  // Tela interna — sem SSR pra não vazar o HTML já renderizado pra quem
+  // acessa a URL direto sem estar logado (ver classificacao.tsx).
+  ssr: false,
+  pendingComponent: AuthGuardFallback,
   head: () => ({
     meta: [
       { title: "FC Comércio Exterior — Simulação de Custos" },
@@ -1408,6 +1413,7 @@ function SimulacaoCustosPage() {
   };
 
   return (
+    <RequireAuth>
     <div className="min-h-screen bg-background">
       <Toaster richColors position="top-center" />
 
@@ -3078,6 +3084,7 @@ function SimulacaoCustosPage() {
         )}
       </main>
     </div>
+    </RequireAuth>
   );
 }
 

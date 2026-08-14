@@ -3,6 +3,7 @@ import { z } from "zod";
 // Importa o cliente oficial do Google Gen AI
 import { GoogleGenAI, Type } from "@google/genai";
 import { createClient } from "@supabase/supabase-js";
+import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 // Se o pacote acima expor de forma diferente na sua árvore, a convenção padrão do SDK atual é:
 // import { GoogleGenAI } from "@google/genai";
 import ws from "ws";
@@ -160,6 +161,7 @@ const geminiResponseSchema = {
 };
 
 export const classifyNcm = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => InputSchema.parse(input))
   .handler(async ({ data }) => {
     const GEMINI_API_KEY = process.env.GEMINI_API_KEY;

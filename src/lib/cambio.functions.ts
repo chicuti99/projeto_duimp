@@ -1,5 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
+import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 
 // Cotação pública (sem chave de API) via AwesomeAPI, usada para
 // pré-preencher a "Taxa de conversão" da Simulação de Custos. O valor
@@ -17,6 +18,7 @@ const AwesomeApiSchema = z.record(
 );
 
 export const fetchCambio = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => InputSchema.parse(input))
   .handler(async ({ data }) => {
     const par = `${data.moeda}-BRL`;

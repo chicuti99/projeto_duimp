@@ -1,6 +1,7 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
+import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 
 // Sugestão rápida de NCM a partir só do nome do produto, para o botão
 // "Buscar NCM" da tela de Simulação de Custos. Depois de setar o NCM
@@ -31,6 +32,7 @@ const geminiResponseSchema = {
 };
 
 export const suggestNcmByProductName = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => InputSchema.parse(input))
   .handler(async ({ data }) => {
     const GEMINI_API_KEY = process.env.GEMINI_API_KEY;

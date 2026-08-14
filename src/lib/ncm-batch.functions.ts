@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { GoogleGenAI, Type } from "@google/genai";
+import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 
 const MAX_DESCRICAO_IA = 1800;
 
@@ -86,6 +87,7 @@ const geminiResponseSchema = {
 };
 
 export const classifyNcmBatch = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => InputSchema.parse(input))
   .handler(async ({ data }) => {
     const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -142,12 +144,25 @@ REGRAS:
 
       return ResultSchema.parse(JSON.parse(responseText));
     } catch (error: any) {
-      if (error?.status === 429) {
+      // O SDK nem sempre preenche `error.status` pra erros vindos do
+      // gateway do Gemini (ex.: 504 DEADLINE_EXCEEDED chega só como JSON
+      // cru dentro de error.message) — por isso também olhamos o texto da
+      // mensagem, não só o status.
+      const message = String(error?.message ?? error ?? "");
+      if (error?.status === 429 || /"code":\s*429|RESOURCE_EXHAUSTED/.test(message)) {
         throw new Error("Limite de requisições atingido na API do Gemini. Aguarde um momento.");
       }
-      if (error?.status === 503) {
-        throw new Error("O serviço de IA está sobrecarregado no momento. Tente novamente em instantes.");
+      if (
+        error?.status === 503 ||
+        error?.status === 504 ||
+        /"code":\s*(503|504)|UNAVAILABLE|DEADLINE_EXCEEDED/.test(message)
+      ) {
+        // Mensagem reconhecida pelo client (BatchClassifier.runAll) pra
+        // decidir se tenta o lote de novo automaticamente.
+        throw new Error(
+          "O serviço de IA está sobrecarregado ou demorou demais para responder. Tente novamente em instantes.",
+        );
       }
-      throw new Error(`Erro na classificação em lote: ${error.message || error}`);
+      throw new Error(`Erro na classificação em lote: ${message}`);
     }
   });

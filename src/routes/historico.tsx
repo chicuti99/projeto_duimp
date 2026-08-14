@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Outlet,createFileRoute, Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { RequireAuth, AuthGuardFallback } from "@/components/RequireAuth";
 import { Toaster } from "@/components/ui/sonner";
 import { supabase } from "@/integrations/supabase/client";
 import type { Tables } from "@/integrations/supabase/types";
@@ -13,6 +14,10 @@ type SearchRow = Tables<"ncm_searches">;
 
 export const Route = createFileRoute("/historico")({
   component: HistoricoPage,
+  // Tela interna — sem SSR pra não vazar o HTML já renderizado pra quem
+  // acessa a URL direto sem estar logado (ver classificacao.tsx).
+  ssr: false,
+  pendingComponent: AuthGuardFallback,
   head: () => ({
     meta: [
       { title: "FC Comércio Exterior — Histórico" },
@@ -74,6 +79,7 @@ function HistoricoPage() {
   }, [items, page]);
 
   return (
+    <RequireAuth>
     <div className="min-h-screen bg-background">
       <Toaster richColors position="top-center" />
 
@@ -172,5 +178,6 @@ function HistoricoPage() {
       </main>
       <Outlet />
     </div>
+    </RequireAuth>
   );
 }

@@ -1,6 +1,7 @@
 import { createFileRoute, Link, useLocation } from "@tanstack/react-router";
 import { NcmClassifier } from "@/components/NcmClassifier";
 import { BatchClassifier } from "@/components/BatchClassifier";
+import { RequireAuth, AuthGuardFallback } from "@/components/RequireAuth";
 import { Toaster } from "@/components/ui/sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -14,6 +15,12 @@ import { Menu, ShieldCheck } from "lucide-react";
 
 export const Route = createFileRoute("/classificacao")({
   component: ClassificacaoPage,
+  // Sem SSR aqui: essa é uma tela interna (só pra usuário logado). Com
+  // SSR ligado, o HTML já sairia do servidor com a tela pronta pra
+  // qualquer um que acessasse a URL direto, logado ou não — foi assim
+  // que um acesso sem login numa aba anônima conseguiu ver a tela.
+  ssr: false,
+  pendingComponent: AuthGuardFallback,
   head: () => ({
     meta: [
       { title: "FC Comércio Exterior — Classificação NCM" },
@@ -29,6 +36,7 @@ function ClassificacaoPage() {
   const location = useLocation();
 
   return (
+    <RequireAuth>
     <div className="min-h-screen bg-background">
       <Toaster richColors position="top-center" />
 
@@ -133,5 +141,6 @@ function ClassificacaoPage() {
         </section>
       </main>
     </div>
+    </RequireAuth>
   );
 }

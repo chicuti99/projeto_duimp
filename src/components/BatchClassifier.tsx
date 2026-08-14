@@ -7,6 +7,13 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { toast } from "sonner";
 
 type InputRow = { descricao: string; ncm_informado: string };
@@ -16,6 +23,17 @@ type InputRow = { descricao: string; ncm_informado: string };
 // desse tamanho e processados um atrás do outro — ver runAll().
 const MAX_BATCH = 50;
 const MAX_DESCRIPTION_CHARS = 1800;
+
+// Mensagens que ncm-batch.functions.ts usa pra erros que valem retry
+// automático (sobrecarga/timeout do Gemini — ver classifyNcmBatch). Erros
+// de validação/schema não batem aqui e falham na hora, sem retry.
+const RETRYABLE_ERROR_HINT = "sobrecarregado ou demorou demais";
+const MAX_LOTE_RETRIES = 2;
+const RETRY_DELAY_MS = 3000;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function chunk<T>(items: T[], size: number): T[][] {
   const chunks: T[][] = [];
@@ -39,22 +57,119 @@ function normalizeRows(input: InputRow[]) {
   return input.map(normalizeRow).filter((row): row is InputRow => Boolean(row));
 }
 
-function pickDescAndNcm(rows: Record<string, unknown>[]): InputRow[] {
-  if (!rows.length) return [];
-  const keys = Object.keys(rows[0]);
-  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const descKey =
-    keys.find((k) => ["descricao", "descrição", "produto", "item", "mercadoria"].includes(norm(k))) ||
-    keys.find((k) => norm(k).includes("descr")) ||
-    keys[0];
-  const ncmKey = keys.find((k) => norm(k) === "ncm") || keys.find((k) => norm(k).includes("ncm"));
-  return rows
-    .map((r) => ({
-      descricao: String(r[descKey] ?? "").trim(),
-      ncm_informado: ncmKey ? String(r[ncmKey] ?? "").trim() : "",
-    }))
-    .map(normalizeRow)
-    .filter((row): row is InputRow => Boolean(row));
+// Sentinela pro <Select> de NCM — Radix não aceita SelectItem value="".
+const NONE_COLUMN = "__nenhuma__";
+
+function normalizeHeader(value: string) {
+  return value
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+const DESCRICAO_HEADER_HINTS = [
+  "produto",
+  "mercadoria",
+  "item",
+  "goods",
+  "commodity",
+  "especificacao",
+  "discriminacao",
+  "nomeproduto",
+  "productname",
+];
+const NCM_HEADER_HINTS = ["ncm", "nbm", "sh", "hscode", "harmonizedcode"];
+
+function sampleColumnValues(rows: Record<string, unknown>[], key: string, limit = 40): string[] {
+  const values: string[] = [];
+  for (const row of rows) {
+    if (values.length >= limit) break;
+    const value = String(row[key] ?? "").trim();
+    if (value) values.push(value);
+  }
+  return values;
+}
+
+// Planilhas de clientes não seguem um formato fixo — nome de cabeçalho
+// sozinho engana fácil (ex.: coluna "Item" com só o número da linha
+// vencia "Description" só por estar na lista de sinônimos). Por isso o
+// conteúdo pesa mais que o nome: penaliza colunas majoritariamente
+// numéricas (índice, quantidade, código) e premia texto mais longo e
+// variado, que é como descrição de produto normalmente se parece.
+function scoreDescricaoColumn(key: string, values: string[]): number {
+  if (!values.length) return -Infinity;
+
+  const header = normalizeHeader(key);
+  let score = 0;
+  if (header.includes("descr")) score += 4;
+  else if (DESCRICAO_HEADER_HINTS.some((hint) => header.includes(hint))) score += 2;
+
+  const numericRatio = values.filter((v) => /^-?\d+([.,]\d+)?$/.test(v)).length / values.length;
+  score -= numericRatio * 6;
+
+  const avgLength = values.reduce((sum, v) => sum + v.length, 0) / values.length;
+  score += Math.min(avgLength / 8, 4);
+
+  const uniqueRatio = new Set(values.map((v) => v.toLowerCase())).size / values.length;
+  score += uniqueRatio * 1.5;
+
+  return score;
+}
+
+// Mesma lógica pro NCM: o conteúdo batendo o padrão XXXX.XX.XX pesa bem
+// mais que o nome da coluna — assim uma coluna "Cód. Fiscal" com NCMs de
+// verdade vence uma "NCM" vazia ou com outra coisa dentro.
+function scoreNcmColumn(key: string, values: string[]): number {
+  if (!values.length) return -Infinity;
+
+  const header = normalizeHeader(key);
+  let score = 0;
+  if (NCM_HEADER_HINTS.some((hint) => header === hint || header.includes(hint))) score += 2;
+
+  const ncmLikeRatio =
+    values.filter((v) => /^\d{4}\.?\d{2}\.?\d{2}$/.test(v.replace(/\s/g, ""))).length / values.length;
+  score += ncmLikeRatio * 6;
+
+  return score;
+}
+
+// Só o palpite inicial — o usuário confere/troca as colunas na UI antes
+// de classificar (ver <Select> de mapeamento em BatchClassifier).
+function guessColumns(rows: Record<string, unknown>[]): { descKey: string; ncmKey: string } {
+  const keys = Object.keys(rows[0] ?? {});
+  if (!keys.length) return { descKey: "", ncmKey: NONE_COLUMN };
+
+  let descKey = keys[0];
+  let bestDescScore = -Infinity;
+  let ncmKey = NONE_COLUMN;
+  let bestNcmScore = 0; // exige sinal mínimo de conteúdo/nome pra sugerir alguma coluna
+
+  for (const key of keys) {
+    const values = sampleColumnValues(rows, key);
+
+    const descScore = scoreDescricaoColumn(key, values);
+    if (descScore > bestDescScore) {
+      bestDescScore = descScore;
+      descKey = key;
+    }
+
+    const ncmScore = scoreNcmColumn(key, values);
+    if (ncmScore > bestNcmScore) {
+      bestNcmScore = ncmScore;
+      ncmKey = key;
+    }
+  }
+
+  return { descKey, ncmKey };
+}
+
+function mapRawRows(rows: Record<string, unknown>[], descKey: string, ncmKey: string): InputRow[] {
+  if (!descKey) return [];
+  return rows.map((r) => ({
+    descricao: String(r[descKey] ?? "").trim(),
+    ncm_informado: ncmKey && ncmKey !== NONE_COLUMN ? String(r[ncmKey] ?? "").trim() : "",
+  }));
 }
 
 async function parsePdf(file: File): Promise<string> {
@@ -97,33 +212,68 @@ export function BatchClassifier() {
   const [progress, setProgress] = useState<{ loteAtual: number; totalLotes: number; itensFeitos: number } | null>(
     null,
   );
+  // Linhas cruas da planilha/CSV + mapeamento de colunas escolhido (por
+  // padrão, o palpite de guessColumns). Fica null pra fontes sem coluna
+  // (PDF, texto colado) — nesses casos `rows` é preenchido direto.
+  const [rawRows, setRawRows] = useState<Record<string, unknown>[] | null>(null);
+  const [columns, setColumns] = useState<string[]>([]);
+  const [descKey, setDescKey] = useState("");
+  const [ncmKey, setNcmKey] = useState(NONE_COLUMN);
   const fileRef = useRef<HTMLInputElement>(null);
   const runFn = useServerFn(classifyNcmBatch);
+
+  function resetColumnMapping() {
+    setRawRows(null);
+    setColumns([]);
+    setDescKey("");
+    setNcmKey(NONE_COLUMN);
+  }
+
+  // Chamado tanto pelo palpite inicial (handleFile) quanto pelos <Select>
+  // de mapeamento, quando o usuário troca a coluna detectada.
+  function applyColumnMapping(sourceRows: Record<string, unknown>[], nextDescKey: string, nextNcmKey: string) {
+    setDescKey(nextDescKey);
+    setNcmKey(nextNcmKey);
+    setRows(normalizeRows(mapRawRows(sourceRows, nextDescKey, nextNcmKey)));
+    setResults(null);
+  }
 
   async function handleFile(file: File) {
     try {
       const name = file.name.toLowerCase();
-      let parsed: InputRow[] = [];
       if (name.endsWith(".xlsx") || name.endsWith(".xls") || name.endsWith(".csv")) {
         const buf = await file.arrayBuffer();
         const wb = XLSX.read(buf, { type: "array" });
         const sheet = wb.Sheets[wb.SheetNames[0]];
         const json = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
-        parsed = pickDescAndNcm(json);
-      } else if (name.endsWith(".pdf")) {
+        if (!json.length) {
+          toast.error("Nenhuma linha encontrada no arquivo");
+          return;
+        }
+        const cols = Object.keys(json[0]);
+        const guess = guessColumns(json);
+        setRawRows(json);
+        setColumns(cols);
+        applyColumnMapping(json, guess.descKey, guess.ncmKey);
+        toast.success(`${json.length} linhas lidas do arquivo`, {
+          description: `Detectamos "${guess.descKey}" como coluna de descrição — confira/troque abaixo se não for essa.`,
+        });
+        return;
+      }
+      if (name.endsWith(".pdf")) {
         const text = await parsePdf(file);
-        parsed = textToRows(text);
-      } else {
-        toast.error("Formato não suportado. Use .xlsx, .csv ou .pdf");
+        const parsed = textToRows(text);
+        if (!parsed.length) {
+          toast.error("Nenhuma descrição válida encontrada no arquivo");
+          return;
+        }
+        resetColumnMapping();
+        setRows(parsed);
+        setResults(null);
+        toast.success(`${parsed.length} itens lidos do arquivo`);
         return;
       }
-      if (!parsed.length) {
-        toast.error("Nenhuma descrição válida encontrada no arquivo");
-        return;
-      }
-      setRows(parsed);
-      setResults(null);
-      toast.success(`${parsed.length} itens lidos do arquivo`);
+      toast.error("Formato não suportado. Use .xlsx, .csv ou .pdf");
     } catch (e) {
       toast.error("Falha ao ler o arquivo");
       console.error(e);
@@ -133,6 +283,7 @@ export function BatchClassifier() {
   function loadPasted() {
     const parsed = textToRows(pasted);
     if (!parsed.length) return toast.error("Nada para importar");
+    resetColumnMapping();
     setRows(parsed);
     setResults(null);
     toast.success(`${parsed.length} itens carregados`);
@@ -151,17 +302,34 @@ export function BatchClassifier() {
     for (let i = 0; i < lotes.length; i++) {
       setProgress({ loteAtual: i + 1, totalLotes: lotes.length, itensFeitos: acumulado.length });
 
-      try {
-        const resultado = await runFn({ data: { itens: lotes[i], operacao: "importacao" } });
-        acumulado.push(...resultado.resultados);
-        setResults([...acumulado]);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Erro desconhecido";
+      let lastMessage = "Erro desconhecido";
+      let sucesso = false;
+
+      // Sobrecarga/timeout do Gemini (504 etc.) costuma ser transitório —
+      // tenta o mesmo lote de novo antes de desistir e abandonar o
+      // progresso já feito nos lotes anteriores.
+      for (let tentativa = 0; tentativa <= MAX_LOTE_RETRIES; tentativa++) {
+        try {
+          const resultado = await runFn({ data: { itens: lotes[i], operacao: "importacao" } });
+          acumulado.push(...resultado.resultados);
+          setResults([...acumulado]);
+          sucesso = true;
+          break;
+        } catch (error) {
+          lastMessage = error instanceof Error ? error.message : "Erro desconhecido";
+          const podeTentarDeNovo =
+            tentativa < MAX_LOTE_RETRIES && lastMessage.includes(RETRYABLE_ERROR_HINT);
+          if (!podeTentarDeNovo) break;
+          await sleep(RETRY_DELAY_MS);
+        }
+      }
+
+      if (!sucesso) {
         toast.error(
           lotes.length > 1
             ? `Falha no lote ${i + 1} de ${lotes.length} — ${acumulado.length} itens já classificados foram mantidos.`
             : "Não foi possível classificar.",
-          { description: message },
+          { description: lastMessage },
         );
         setIsRunning(false);
         setProgress(null);
@@ -243,6 +411,46 @@ export function BatchClassifier() {
         </div>
       </div>
 
+      {rawRows && columns.length > 0 && (
+        <div className="grid sm:grid-cols-2 gap-3 border rounded-md p-3 bg-muted/20">
+          <p className="text-xs text-muted-foreground sm:col-span-2">
+            Detectamos as colunas abaixo automaticamente pelo conteúdo da planilha — como o formato varia de arquivo
+            pra arquivo, confira e troque se não bater com a sua.
+          </p>
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium">Coluna de descrição do produto</label>
+            <Select value={descKey} onValueChange={(value) => applyColumnMapping(rawRows, value, ncmKey)}>
+              <SelectTrigger className="h-9">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {columns.map((col) => (
+                  <SelectItem key={col} value={col}>
+                    {col}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium">Coluna de NCM já informado (opcional)</label>
+            <Select value={ncmKey} onValueChange={(value) => applyColumnMapping(rawRows, descKey, value)}>
+              <SelectTrigger className="h-9">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NONE_COLUMN}>Nenhuma</SelectItem>
+                {columns.map((col) => (
+                  <SelectItem key={col} value={col}>
+                    {col}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+      )}
+
       {rows.length > 0 && (
         <div className="flex items-center justify-between border rounded-md p-3 bg-secondary/30">
           <div className="text-sm">
@@ -260,7 +468,16 @@ export function BatchClassifier() {
             )}
           </div>
           <div className="flex gap-2">
-            <Button size="sm" variant="ghost" onClick={() => { setRows([]); setResults(null); }} disabled={isRunning}>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setRows([]);
+                setResults(null);
+                resetColumnMapping();
+              }}
+              disabled={isRunning}
+            >
               <Trash2 className="h-4 w-4 mr-1" /> Limpar
             </Button>
             <Button size="sm" onClick={runAll} disabled={isRunning}>

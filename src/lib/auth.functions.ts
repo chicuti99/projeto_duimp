@@ -10,6 +10,12 @@ const SaveProfileInputSchema = z.object({
   telephone: z.string().optional().default(""),
 });
 
+// Fica sem requireSupabaseAuth de propósito: no cadastro (signUp), o
+// Supabase deste projeto exige confirmação de e-mail (mailer_autoconfirm
+// = false), então ainda não existe sessão/bearer token no momento dessa
+// chamada — exigir auth aqui quebraria a criação de perfil no primeiro
+// cadastro. Ver [[protecao-telas-internas-sem-login]] para o resto do
+// que foi protegido.
 export const saveUserProfile = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => SaveProfileInputSchema.parse(input))
   .handler(async ({ data }) => {

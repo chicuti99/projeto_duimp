@@ -164,6 +164,15 @@ const ROW_ID_HEADER_HINTS = [
   "referencia",
   "reference",
 ];
+const QUANTITY_PRICE_HEADER_HINTS = [
+  "quantidade",
+  "quantity",
+  "qty",
+  "preco",
+  "price",
+  "subtotal",
+  "total",
+];
 
 function sampleColumnValues(
   rows: Record<string, unknown>[],
@@ -291,6 +300,26 @@ function makeUniqueHeader(rawHeader: unknown[], width: number) {
   });
 }
 
+function makeGenericHeaders(width: number) {
+  return Array.from(
+    { length: width },
+    (_, index) => `Coluna ${XLSX.utils.encode_col(index)}`,
+  );
+}
+
+function hasHeaderIntent(row: unknown[]) {
+  const headers = row
+    .map((cell) => normalizeHeader(cellToText(cell)))
+    .filter(Boolean);
+
+  return headers.some(
+    (header) =>
+      PRODUCT_LIST_HEADER_HINTS.some((hint) => header.includes(hint)) ||
+      NCM_HEADER_HINTS.some((hint) => header.includes(hint)) ||
+      QUANTITY_PRICE_HEADER_HINTS.some((hint) => header.includes(hint)),
+  );
+}
+
 function scoreHeaderRow(row: unknown[], followingRows: unknown[][]) {
   const headers = row
     .map((cell) => normalizeHeader(cellToText(cell)))
@@ -307,9 +336,7 @@ function scoreHeaderRow(row: unknown[], followingRows: unknown[][]) {
       NCM_HEADER_HINTS.some((hint) => header.includes(hint)),
     ).length * 4;
   score += headers.filter((header) =>
-    ["quantidade", "quantity", "qty", "preco", "price", "subtotal"].some(
-      (hint) => header.includes(hint),
-    ),
+    QUANTITY_PRICE_HEADER_HINTS.some((hint) => header.includes(hint)),
   ).length;
   score +=
     followingRows.filter((nextRow) => nextRow.some((cell) => cellToText(cell)))
@@ -342,9 +369,12 @@ function sheetToRows(sheet: XLSX.WorkSheet): Record<string, unknown>[] {
     }
   }
 
-  const headers = makeUniqueHeader(matrix[headerIndex] ?? [], width);
+  const hasDetectedHeader = hasHeaderIntent(matrix[headerIndex] ?? []);
+  const headers = hasDetectedHeader
+    ? makeUniqueHeader(matrix[headerIndex] ?? [], width)
+    : makeGenericHeaders(width);
   return matrix
-    .slice(headerIndex + 1)
+    .slice(hasDetectedHeader ? headerIndex + 1 : 0)
     .map((row) => {
       const record: Record<string, unknown> = {};
       headers.forEach((header, index) => {
@@ -360,6 +390,36 @@ function hasProductColumnIntent(keys: string[]) {
     const header = normalizeHeader(key);
     return PRODUCT_LIST_HEADER_HINTS.some((hint) => header.includes(hint));
   });
+}
+
+function looksLikeProductCode(value: string) {
+  const text = value.trim();
+  if (text.length < 4 || text.length > 120) return false;
+  if (/^-?\d+([.,]\d+)?$/.test(text)) return false;
+  if (/^\d{4}\.?\d{2}\.?\d{2}$/.test(text.replace(/\s/g, ""))) return false;
+
+  return /[A-Za-z]/.test(text) && /\d/.test(text);
+}
+
+function scoreProductCodeColumn(values: string[]): number {
+  if (values.length < 2) return -Infinity;
+
+  const codeRatio =
+    values.filter((value) => looksLikeProductCode(value)).length /
+    values.length;
+  const uniqueRatio =
+    new Set(values.map((value) => value.toLowerCase())).size / values.length;
+  const avgLength =
+    values.reduce((sum, value) => sum + value.length, 0) / values.length;
+
+  return codeRatio * 8 + uniqueRatio * 1.5 + Math.min(avgLength / 12, 2);
+}
+
+function hasProductContentIntent(rows: Record<string, unknown>[]) {
+  const keys = Object.keys(rows[0] ?? {});
+  return keys.some(
+    (key) => scoreProductCodeColumn(sampleColumnValues(rows, key)) >= 6,
+  );
 }
 
 function selectRowIdKey(keys: string[]) {
@@ -404,7 +464,10 @@ function buildSheetCandidate(
   rawRows: Record<string, unknown>[],
 ): SpreadsheetSheetCandidate | null {
   const keys = Object.keys(rawRows[0] ?? {});
-  if (!keys.length || !hasProductColumnIntent(keys)) return null;
+  const hasHeaderProductIntent = hasProductColumnIntent(keys);
+  const hasContentProductIntent = hasProductContentIntent(rawRows);
+  if (!keys.length || (!hasHeaderProductIntent && !hasContentProductIntent))
+    return null;
 
   const guess = guessColumns(rawRows);
   const mappedRows = normalizeRows(
@@ -427,6 +490,7 @@ function buildSheetCandidate(
   let score = Math.min(mappedRows.length, 80) * 0.25 + Math.max(0, descScore);
   if (hasStrongDescriptionHeader) score += 8;
   else if (hasCodeOnlyHeader) score += 2;
+  if (hasContentProductIntent) score += 3;
   if (guess.ncmKey !== NONE_COLUMN) score += 4;
 
   return {

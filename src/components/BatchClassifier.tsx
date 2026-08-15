@@ -1,8 +1,21 @@
 import { useRef, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
 import * as XLSX from "xlsx";
-import { Upload, Loader2, FileSpreadsheet, FileText, Download, AlertTriangle, CheckCircle2, Trash2 } from "lucide-react";
-import { classifyNcmBatch, type NcmBatchItem } from "@/lib/ncm-batch.functions";
+import {
+  Upload,
+  Loader2,
+  FileSpreadsheet,
+  FileText,
+  Download,
+  AlertTriangle,
+  CheckCircle2,
+  Trash2,
+} from "lucide-react";
+import {
+  classifyNcmBatch,
+  extractNcmRowsFromPdfImages,
+  type NcmBatchItem,
+} from "@/lib/ncm-batch.functions";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -17,8 +30,20 @@ import {
 import { toast } from "sonner";
 
 type InputRow = { descricao: string; ncm_informado: string };
-type PdfTextToken = { text: string; x: number; y: number; width: number; height: number };
+type PdfTextToken = {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
 type PdfTextLine = { y: number; height: number; tokens: PdfTextToken[] };
+type PdfOcrImage = {
+  page: number;
+  mimeType: "image/jpeg";
+  data: string;
+  kind: string;
+};
 type SpreadsheetSheetCandidate = {
   sheetName: string;
   rawRows: Record<string, unknown>[];
@@ -54,6 +79,13 @@ const NCM_PATTERN = /\b(?:\d{4}\.\d{2}\.\d{2}|\d{8})\b/g;
 const SHEET_COLUMN = "Aba";
 const DETECTED_DESC_COLUMN = "Descrição detectada";
 const DETECTED_NCM_COLUMN = "NCM detectado";
+const PDF_OCR_MAX_PAGES = 25;
+const PDF_OCR_TARGET_WIDTH = 2600;
+const PDF_OCR_MIN_SCALE = 2.2;
+const PDF_OCR_MAX_SCALE = 4.6;
+const PDF_OCR_IMAGE_QUALITY = 0.94;
+const PDF_OCR_MAX_IMAGES_PER_CALL = 40;
+const MAX_PDF_OCR_RETRIES = 2;
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -119,10 +151,25 @@ const DESCRICAO_HEADER_HINTS = [
   "reference",
 ];
 const NCM_HEADER_HINTS = ["ncm", "nbm", "sh", "hscode", "harmonizedcode"];
-const PRODUCT_LIST_HEADER_HINTS = DESCRICAO_HEADER_HINTS.filter((hint) => hint !== "item");
-const ROW_ID_HEADER_HINTS = ["codigo", "code", "sku", "partnumber", "modelo", "model", "referencia", "reference"];
+const PRODUCT_LIST_HEADER_HINTS = DESCRICAO_HEADER_HINTS.filter(
+  (hint) => hint !== "item",
+);
+const ROW_ID_HEADER_HINTS = [
+  "codigo",
+  "code",
+  "sku",
+  "partnumber",
+  "modelo",
+  "model",
+  "referencia",
+  "reference",
+];
 
-function sampleColumnValues(rows: Record<string, unknown>[], key: string, limit = 40): string[] {
+function sampleColumnValues(
+  rows: Record<string, unknown>[],
+  key: string,
+  limit = 40,
+): string[] {
   const values: string[] = [];
   for (const row of rows) {
     if (values.length >= limit) break;
@@ -144,15 +191,19 @@ function scoreDescricaoColumn(key: string, values: string[]): number {
   const header = normalizeHeader(key);
   let score = 0;
   if (header.includes("descr")) score += 4;
-  else if (DESCRICAO_HEADER_HINTS.some((hint) => header.includes(hint))) score += 2;
+  else if (DESCRICAO_HEADER_HINTS.some((hint) => header.includes(hint)))
+    score += 2;
 
-  const numericRatio = values.filter((v) => /^-?\d+([.,]\d+)?$/.test(v)).length / values.length;
+  const numericRatio =
+    values.filter((v) => /^-?\d+([.,]\d+)?$/.test(v)).length / values.length;
   score -= numericRatio * 6;
 
-  const avgLength = values.reduce((sum, v) => sum + v.length, 0) / values.length;
+  const avgLength =
+    values.reduce((sum, v) => sum + v.length, 0) / values.length;
   score += Math.min(avgLength / 8, 4);
 
-  const uniqueRatio = new Set(values.map((v) => v.toLowerCase())).size / values.length;
+  const uniqueRatio =
+    new Set(values.map((v) => v.toLowerCase())).size / values.length;
   score += uniqueRatio * 1.5;
 
   return score;
@@ -166,10 +217,12 @@ function scoreNcmColumn(key: string, values: string[]): number {
 
   const header = normalizeHeader(key);
   let score = 0;
-  if (NCM_HEADER_HINTS.some((hint) => header === hint || header.includes(hint))) score += 2;
+  if (NCM_HEADER_HINTS.some((hint) => header === hint || header.includes(hint)))
+    score += 2;
 
   const ncmLikeRatio =
-    values.filter((v) => /^\d{4}\.?\d{2}\.?\d{2}$/.test(v.replace(/\s/g, ""))).length / values.length;
+    values.filter((v) => /^\d{4}\.?\d{2}\.?\d{2}$/.test(v.replace(/\s/g, "")))
+      .length / values.length;
   score += ncmLikeRatio * 6;
 
   return score;
@@ -177,7 +230,10 @@ function scoreNcmColumn(key: string, values: string[]): number {
 
 // Só o palpite inicial — o usuário confere/troca as colunas na UI antes
 // de classificar (ver <Select> de mapeamento em BatchClassifier).
-function guessColumns(rows: Record<string, unknown>[]): { descKey: string; ncmKey: string } {
+function guessColumns(rows: Record<string, unknown>[]): {
+  descKey: string;
+  ncmKey: string;
+} {
   const keys = Object.keys(rows[0] ?? {});
   if (!keys.length) return { descKey: "", ncmKey: NONE_COLUMN };
 
@@ -205,11 +261,16 @@ function guessColumns(rows: Record<string, unknown>[]): { descKey: string; ncmKe
   return { descKey, ncmKey };
 }
 
-function mapRawRows(rows: Record<string, unknown>[], descKey: string, ncmKey: string): InputRow[] {
+function mapRawRows(
+  rows: Record<string, unknown>[],
+  descKey: string,
+  ncmKey: string,
+): InputRow[] {
   if (!descKey) return [];
   return rows.map((r) => ({
     descricao: String(r[descKey] ?? "").trim(),
-    ncm_informado: ncmKey && ncmKey !== NONE_COLUMN ? String(r[ncmKey] ?? "").trim() : "",
+    ncm_informado:
+      ncmKey && ncmKey !== NONE_COLUMN ? String(r[ncmKey] ?? "").trim() : "",
   }));
 }
 
@@ -222,7 +283,8 @@ function makeUniqueHeader(rawHeader: unknown[], width: number) {
   const seen = new Map<string, number>();
 
   return Array.from({ length: width }, (_, index) => {
-    const base = cellToText(rawHeader[index]) || `Coluna ${XLSX.utils.encode_col(index)}`;
+    const base =
+      cellToText(rawHeader[index]) || `Coluna ${XLSX.utils.encode_col(index)}`;
     const count = seen.get(base) ?? 0;
     seen.set(base, count + 1);
     return count ? `${base} ${count + 1}` : base;
@@ -230,16 +292,28 @@ function makeUniqueHeader(rawHeader: unknown[], width: number) {
 }
 
 function scoreHeaderRow(row: unknown[], followingRows: unknown[][]) {
-  const headers = row.map((cell) => normalizeHeader(cellToText(cell))).filter(Boolean);
+  const headers = row
+    .map((cell) => normalizeHeader(cellToText(cell)))
+    .filter(Boolean);
   if (headers.length < 2) return -Infinity;
 
   let score = headers.length;
-  score += headers.filter((header) => PRODUCT_LIST_HEADER_HINTS.some((hint) => header.includes(hint))).length * 5;
-  score += headers.filter((header) => NCM_HEADER_HINTS.some((hint) => header.includes(hint))).length * 4;
+  score +=
+    headers.filter((header) =>
+      PRODUCT_LIST_HEADER_HINTS.some((hint) => header.includes(hint)),
+    ).length * 5;
+  score +=
+    headers.filter((header) =>
+      NCM_HEADER_HINTS.some((hint) => header.includes(hint)),
+    ).length * 4;
   score += headers.filter((header) =>
-    ["quantidade", "quantity", "qty", "preco", "price", "subtotal"].some((hint) => header.includes(hint)),
+    ["quantidade", "quantity", "qty", "preco", "price", "subtotal"].some(
+      (hint) => header.includes(hint),
+    ),
   ).length;
-  score += followingRows.filter((nextRow) => nextRow.some((cell) => cellToText(cell))).length * 0.25;
+  score +=
+    followingRows.filter((nextRow) => nextRow.some((cell) => cellToText(cell)))
+      .length * 0.25;
 
   return score;
 }
@@ -258,7 +332,10 @@ function sheetToRows(sheet: XLSX.WorkSheet): Record<string, unknown>[] {
   const searchLimit = Math.min(matrix.length, 25);
 
   for (let index = 0; index < searchLimit; index++) {
-    const score = scoreHeaderRow(matrix[index] ?? [], matrix.slice(index + 1, index + 6));
+    const score = scoreHeaderRow(
+      matrix[index] ?? [],
+      matrix.slice(index + 1, index + 6),
+    );
     if (score > bestScore) {
       bestScore = score;
       headerIndex = index;
@@ -322,12 +399,17 @@ function overlapRatio(a: Set<string>, b: Set<string>) {
   return overlap / smaller.size;
 }
 
-function buildSheetCandidate(sheetName: string, rawRows: Record<string, unknown>[]): SpreadsheetSheetCandidate | null {
+function buildSheetCandidate(
+  sheetName: string,
+  rawRows: Record<string, unknown>[],
+): SpreadsheetSheetCandidate | null {
   const keys = Object.keys(rawRows[0] ?? {});
   if (!keys.length || !hasProductColumnIntent(keys)) return null;
 
   const guess = guessColumns(rawRows);
-  const mappedRows = normalizeRows(mapRawRows(rawRows, guess.descKey, guess.ncmKey));
+  const mappedRows = normalizeRows(
+    mapRawRows(rawRows, guess.descKey, guess.ncmKey),
+  );
   if (mappedRows.length < 2) return null;
 
   const descValues = sampleColumnValues(rawRows, guess.descKey);
@@ -335,8 +417,12 @@ function buildSheetCandidate(sheetName: string, rawRows: Record<string, unknown>
   const descHeader = normalizeHeader(guess.descKey);
   const hasStrongDescriptionHeader =
     descHeader.includes("descr") ||
-    ["produto", "mercadoria", "productname"].some((hint) => descHeader.includes(hint));
-  const hasCodeOnlyHeader = ROW_ID_HEADER_HINTS.some((hint) => descHeader.includes(hint));
+    ["produto", "mercadoria", "productname"].some((hint) =>
+      descHeader.includes(hint),
+    );
+  const hasCodeOnlyHeader = ROW_ID_HEADER_HINTS.some((hint) =>
+    descHeader.includes(hint),
+  );
 
   let score = Math.min(mappedRows.length, 80) * 0.25 + Math.max(0, descScore);
   if (hasStrongDescriptionHeader) score += 8;
@@ -358,14 +444,17 @@ function parseSpreadsheetWorkbook(wb: XLSX.WorkBook): SpreadsheetParseResult {
   const candidates = wb.SheetNames.map((sheetName) => {
     const sheet = wb.Sheets[sheetName];
     return sheet ? buildSheetCandidate(sheetName, sheetToRows(sheet)) : null;
-  }).filter((candidate): candidate is SpreadsheetSheetCandidate => Boolean(candidate));
+  }).filter((candidate): candidate is SpreadsheetSheetCandidate =>
+    Boolean(candidate),
+  );
 
   const selected: SpreadsheetSheetCandidate[] = [];
   const skippedSheets: string[] = [];
 
   for (const candidate of [...candidates].sort((a, b) => b.score - a.score)) {
     const duplicateOfBetterSheet = selected.some(
-      (selectedCandidate) => overlapRatio(candidate.rowIds, selectedCandidate.rowIds) >= 0.75,
+      (selectedCandidate) =>
+        overlapRatio(candidate.rowIds, selectedCandidate.rowIds) >= 0.75,
     );
 
     if (duplicateOfBetterSheet) {
@@ -379,8 +468,16 @@ function parseSpreadsheetWorkbook(wb: XLSX.WorkBook): SpreadsheetParseResult {
     candidate.rawRows.flatMap((row) => {
       const detectedDescription = cellToText(row[candidate.descKey]);
       const detectedNcm =
-        candidate.ncmKey && candidate.ncmKey !== NONE_COLUMN ? cellToText(row[candidate.ncmKey]) : "";
-      if (!normalizeRow({ descricao: detectedDescription, ncm_informado: detectedNcm })) return [];
+        candidate.ncmKey && candidate.ncmKey !== NONE_COLUMN
+          ? cellToText(row[candidate.ncmKey])
+          : "";
+      if (
+        !normalizeRow({
+          descricao: detectedDescription,
+          ncm_informado: detectedNcm,
+        })
+      )
+        return [];
 
       return [
         {
@@ -392,37 +489,52 @@ function parseSpreadsheetWorkbook(wb: XLSX.WorkBook): SpreadsheetParseResult {
       ];
     }),
   );
-  const originalColumns = Array.from(new Set(combinedRawRows.flatMap((row) => Object.keys(row))));
+  const originalColumns = Array.from(
+    new Set(combinedRawRows.flatMap((row) => Object.keys(row))),
+  );
   const columns = [
     DETECTED_DESC_COLUMN,
     DETECTED_NCM_COLUMN,
     SHEET_COLUMN,
     ...originalColumns.filter(
-      (column) => ![DETECTED_DESC_COLUMN, DETECTED_NCM_COLUMN, SHEET_COLUMN].includes(column),
+      (column) =>
+        ![DETECTED_DESC_COLUMN, DETECTED_NCM_COLUMN, SHEET_COLUMN].includes(
+          column,
+        ),
     ),
   ];
-  const rows = normalizeRows(mapRawRows(combinedRawRows, DETECTED_DESC_COLUMN, DETECTED_NCM_COLUMN));
+  const rows = normalizeRows(
+    mapRawRows(combinedRawRows, DETECTED_DESC_COLUMN, DETECTED_NCM_COLUMN),
+  );
 
   return {
     rawRows: combinedRawRows,
     columns,
     rows,
     descKey: DETECTED_DESC_COLUMN,
-    ncmKey: rows.some((row) => row.ncm_informado) ? DETECTED_NCM_COLUMN : NONE_COLUMN,
+    ncmKey: rows.some((row) => row.ncm_informado)
+      ? DETECTED_NCM_COLUMN
+      : NONE_COLUMN,
     includedSheets: selected.map((candidate) => candidate.sheetName),
     skippedSheets,
   };
 }
 
 function tokenFromPdfItem(item: any): PdfTextToken | null {
-  const text = String(item?.str ?? "").replace(/\s+/g, " ").trim();
+  const text = String(item?.str ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
   const transform = Array.isArray(item?.transform) ? item.transform : [];
   const x = Number(transform[4]);
   const y = Number(transform[5]);
   if (!text || !Number.isFinite(x) || !Number.isFinite(y)) return null;
 
   const width = Number(item?.width) || Math.max(text.length * 5, 1);
-  const height = Number(item?.height) || Math.abs(Number(transform[3])) || Math.abs(Number(transform[0])) || 10;
+  const height =
+    Number(item?.height) ||
+    Math.abs(Number(transform[3])) ||
+    Math.abs(Number(transform[0])) ||
+    10;
   return { text, x, y, width, height };
 }
 
@@ -432,7 +544,9 @@ function buildPdfTextLines(tokens: PdfTextToken[]): string[] {
 
   for (const token of sorted) {
     const tolerance = Math.max(2.5, Math.min(7, token.height * 0.55));
-    const line = lines.find((candidate) => Math.abs(candidate.y - token.y) <= tolerance);
+    const line = lines.find(
+      (candidate) => Math.abs(candidate.y - token.y) <= tolerance,
+    );
 
     if (line) {
       const count = line.tokens.length;
@@ -461,7 +575,8 @@ function buildPdfTextLines(tokens: PdfTextToken[]): string[] {
       for (const token of ordered) {
         if (lastRight !== null) {
           const gap = token.x - lastRight;
-          if (gap > Math.max(2, avgCharWidth * 0.6) && !text.endsWith(" ")) text += " ";
+          if (gap > Math.max(2, avgCharWidth * 0.6) && !text.endsWith(" "))
+            text += " ";
         }
         text += token.text;
         lastRight = Math.max(lastRight ?? token.x, token.x + token.width);
@@ -472,21 +587,165 @@ function buildPdfTextLines(tokens: PdfTextToken[]): string[] {
     .filter(Boolean);
 }
 
-async function parsePdf(file: File): Promise<string> {
-  // dynamic import to keep initial bundle light
+async function loadPdfjs() {
   const pdfjs = await import("pdfjs-dist");
   const worker = await import("pdfjs-dist/build/pdf.worker.min.mjs?url");
   pdfjs.GlobalWorkerOptions.workerSrc = (worker as { default: string }).default;
+  return pdfjs;
+}
+
+async function parsePdf(file: File): Promise<string> {
+  const pdfjs = await loadPdfjs();
   const buf = await file.arrayBuffer();
   const doc = await pdfjs.getDocument({ data: buf }).promise;
   const pages: string[] = [];
   for (let i = 1; i <= doc.numPages; i++) {
     const page = await doc.getPage(i);
     const content = await page.getTextContent();
-    const tokens = content.items.map(tokenFromPdfItem).filter((token): token is PdfTextToken => Boolean(token));
+    const tokens = content.items
+      .map(tokenFromPdfItem)
+      .filter((token): token is PdfTextToken => Boolean(token));
     pages.push(buildPdfTextLines(tokens).join("\n"));
   }
   return pages.join("\n");
+}
+
+async function openPdfForOcr(file: File) {
+  const pdfjs = await loadPdfjs();
+  const buf = await file.arrayBuffer();
+  return pdfjs.getDocument({ data: buf }).promise;
+}
+
+function canvasToOcrImage(
+  canvas: HTMLCanvasElement,
+  pageNumber: number,
+  kind: string,
+): PdfOcrImage {
+  return {
+    page: pageNumber,
+    kind,
+    mimeType: "image/jpeg",
+    data:
+      canvas.toDataURL("image/jpeg", PDF_OCR_IMAGE_QUALITY).split(",")[1] ?? "",
+  };
+}
+
+function cropCanvas(
+  source: HTMLCanvasElement,
+  crop: { x: number; y: number; width: number; height: number },
+) {
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d", { alpha: false });
+  if (!context) throw new Error("Não foi possível preparar OCR do PDF.");
+
+  canvas.width = Math.ceil(crop.width);
+  canvas.height = Math.ceil(crop.height);
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(
+    source,
+    crop.x,
+    crop.y,
+    crop.width,
+    crop.height,
+    0,
+    0,
+    canvas.width,
+    canvas.height,
+  );
+  return canvas;
+}
+
+function clampCrop(
+  source: HTMLCanvasElement,
+  crop: { x: number; y: number; width: number; height: number },
+) {
+  const x = Math.max(0, Math.min(source.width - 1, crop.x));
+  const y = Math.max(0, Math.min(source.height - 1, crop.y));
+  const width = Math.max(1, Math.min(source.width - x, crop.width));
+  const height = Math.max(1, Math.min(source.height - y, crop.height));
+  return { x, y, width, height };
+}
+
+async function renderPdfPageForOcr(
+  doc: any,
+  pageNumber: number,
+): Promise<PdfOcrImage[]> {
+  const page = await doc.getPage(pageNumber);
+  const baseViewport = page.getViewport({ scale: 1 });
+  const scale = Math.min(
+    PDF_OCR_MAX_SCALE,
+    Math.max(PDF_OCR_MIN_SCALE, PDF_OCR_TARGET_WIDTH / baseViewport.width),
+  );
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d", { alpha: false });
+  if (!context) throw new Error("Não foi possível preparar OCR do PDF.");
+
+  canvas.width = Math.ceil(viewport.width);
+  canvas.height = Math.ceil(viewport.height);
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvas, canvasContext: context, viewport }).promise;
+
+  const crops = [
+    {
+      kind: "pagina-inteira",
+      canvas,
+    },
+    {
+      kind: "miolo-amplo",
+      canvas: cropCanvas(
+        canvas,
+        clampCrop(canvas, {
+          x: canvas.width * 0.03,
+          y: canvas.height * 0.15,
+          width: canvas.width * 0.94,
+          height: canvas.height * 0.78,
+        }),
+      ),
+    },
+    {
+      kind: "tabela-produtos-provavel",
+      canvas: cropCanvas(
+        canvas,
+        clampCrop(canvas, {
+          x: canvas.width * 0.05,
+          y: canvas.height * 0.28,
+          width: canvas.width * 0.9,
+          height: canvas.height * 0.58,
+        }),
+      ),
+    },
+    {
+      kind: "cabecalho-e-primeiras-linhas",
+      canvas: cropCanvas(
+        canvas,
+        clampCrop(canvas, {
+          x: canvas.width * 0.02,
+          y: canvas.height * 0.02,
+          width: canvas.width * 0.96,
+          height: canvas.height * 0.36,
+        }),
+      ),
+    },
+    {
+      kind: "rodape-e-continuacao",
+      canvas: cropCanvas(
+        canvas,
+        clampCrop(canvas, {
+          x: canvas.width * 0.03,
+          y: canvas.height * 0.58,
+          width: canvas.width * 0.94,
+          height: canvas.height * 0.38,
+        }),
+      ),
+    },
+  ];
+
+  return crops.map(({ kind, canvas: crop }) =>
+    canvasToOcrImage(crop, pageNumber, kind),
+  );
 }
 
 function cleanupPdfLine(line: string) {
@@ -500,7 +759,10 @@ function cleanupPdfLine(line: string) {
 function isPdfNoiseLine(line: string) {
   const normalized = normalizeHeader(line);
   if (!normalized) return true;
-  if (["item", "description", "descricao", "ncm", "hscode"].includes(normalized)) return true;
+  if (
+    ["item", "description", "descricao", "ncm", "hscode"].includes(normalized)
+  )
+    return true;
 
   return [
     "commercialinvoice",
@@ -547,7 +809,9 @@ function findNcmInLine(line: string) {
 
   const lineEnd = line.trimEnd().length;
   const labeled = /\b(ncm|hscode|hs\s*code|nbm)\b/i.test(line);
-  const trailing = matches.filter((match) => match.index + match.raw.length >= lineEnd - 8);
+  const trailing = matches.filter(
+    (match) => match.index + match.raw.length >= lineEnd - 8,
+  );
   const dotted = matches.filter((match) => match.raw.includes("."));
 
   if (trailing.length) return trailing[trailing.length - 1];
@@ -559,7 +823,10 @@ function findNcmInLine(line: string) {
 function stripTableRowPrefix(value: string) {
   return value
     .replace(/^\s*(?:item|it\.?|no\.?|n[ºo])?\s*\d{1,6}\s*[-.)|:]?\s+/i, "")
-    .replace(/^\s*(?:description|descricao|product|produto|mercadoria)\s*[:|-]?\s*/i, "")
+    .replace(
+      /^\s*(?:description|descricao|product|produto|mercadoria)\s*[:|-]?\s*/i,
+      "",
+    )
     .replace(/\s*(?:ncm|hs\s*code|hscode)\s*[:|-]?\s*$/i, "")
     .replace(/^[\s\-–—|;,.:]+|[\s\-–—|;,.:]+$/g, "")
     .trim();
@@ -588,13 +855,19 @@ function extractInlineTableRows(lines: string[]) {
 
     const ncmMatch = findNcmInLine(line);
     if (ncmMatch) {
-      const before = stripTableRowPrefix(line.slice(0, ncmMatch.index).replace(/[-–—|;,]+/g, " "));
+      const before = stripTableRowPrefix(
+        line.slice(0, ncmMatch.index).replace(/[-–—|;,]+/g, " "),
+      );
       const after = stripTableRowPrefix(
-        line.slice(ncmMatch.index + ncmMatch.raw.length).replace(/[-–—|;,]+/g, " "),
+        line
+          .slice(ncmMatch.index + ncmMatch.raw.length)
+          .replace(/[-–—|;,]+/g, " "),
       );
       const ncmNearStart =
-        ncmMatch.index < 24 || /\b(ncm|hscode|hs\s*code|nbm)\b/i.test(line.slice(0, ncmMatch.index));
-      const desc = ncmNearStart && isProductLikeDescription(after) ? after : before;
+        ncmMatch.index < 24 ||
+        /\b(ncm|hscode|hs\s*code|nbm)\b/i.test(line.slice(0, ncmMatch.index));
+      const desc =
+        ncmNearStart && isProductLikeDescription(after) ? after : before;
 
       if (isProductLikeDescription(desc)) {
         rows.push({ descricao: desc, ncm_informado: ncmMatch.ncm });
@@ -612,8 +885,14 @@ function extractInlineTableRows(lines: string[]) {
     if (/^\s*\d{1,6}\s+/.test(line)) {
       if (pending) rows.push(pending);
       pending = { descricao: desc, ncm_informado: "" };
-    } else if (pending && pending.descricao.length < MAX_DESCRIPTION_CHARS * 0.8) {
-      pending = { descricao: `${pending.descricao} ${desc}`, ncm_informado: pending.ncm_informado };
+    } else if (
+      pending &&
+      pending.descricao.length < MAX_DESCRIPTION_CHARS * 0.8
+    ) {
+      pending = {
+        descricao: `${pending.descricao} ${desc}`,
+        ncm_informado: pending.ncm_informado,
+      };
     }
   }
 
@@ -624,7 +903,9 @@ function extractInlineTableRows(lines: string[]) {
 function extractStackedColumnRows(lines: string[]) {
   const firstNcmIndex = lines.findIndex((line) => {
     const ncmMatch = findNcmInLine(line);
-    return Boolean(ncmMatch) && line.replace(NCM_PATTERN, "").trim().length === 0;
+    return (
+      Boolean(ncmMatch) && line.replace(NCM_PATTERN, "").trim().length === 0
+    );
   });
   if (firstNcmIndex < 0) return [];
 
@@ -632,7 +913,11 @@ function extractStackedColumnRows(lines: string[]) {
     .slice(0, firstNcmIndex)
     .map((line, index) => ({ line, index }))
     .reverse()
-    .find(({ line }) => ["description", "descricao", "produto", "mercadoria"].includes(normalizeHeader(line)))?.index;
+    .find(({ line }) =>
+      ["description", "descricao", "produto", "mercadoria"].includes(
+        normalizeHeader(line),
+      ),
+    )?.index;
   if (descHeaderIndex === undefined) return [];
 
   const descriptions = lines
@@ -668,12 +953,10 @@ function textToRows(text: string): InputRow[] {
 
   return dedupeRows(
     normalizeRows(
-      lines
-        .filter(isProductLikeDescription)
-        .map((line) => ({
-          descricao: stripTableRowPrefix(line),
-          ncm_informado: findNcmInLine(line)?.ncm ?? "",
-        })),
+      lines.filter(isProductLikeDescription).map((line) => ({
+        descricao: stripTableRowPrefix(line),
+        ncm_informado: findNcmInLine(line)?.ncm ?? "",
+      })),
     ),
   );
 }
@@ -683,18 +966,48 @@ export function BatchClassifier() {
   const [results, setResults] = useState<NcmBatchItem[] | null>(null);
   const [pasted, setPasted] = useState("");
   const [isRunning, setIsRunning] = useState(false);
-  const [progress, setProgress] = useState<{ loteAtual: number; totalLotes: number; itensFeitos: number } | null>(
-    null,
-  );
+  const [progress, setProgress] = useState<{
+    loteAtual: number;
+    totalLotes: number;
+    itensFeitos: number;
+  } | null>(null);
   // Linhas cruas da planilha/CSV + mapeamento de colunas escolhido (por
   // padrão, o palpite de guessColumns). Fica null pra fontes sem coluna
   // (PDF, texto colado) — nesses casos `rows` é preenchido direto.
-  const [rawRows, setRawRows] = useState<Record<string, unknown>[] | null>(null);
+  const [rawRows, setRawRows] = useState<Record<string, unknown>[] | null>(
+    null,
+  );
   const [columns, setColumns] = useState<string[]>([]);
   const [descKey, setDescKey] = useState("");
   const [ncmKey, setNcmKey] = useState(NONE_COLUMN);
   const fileRef = useRef<HTMLInputElement>(null);
   const runFn = useServerFn(classifyNcmBatch);
+  const extractPdfFn = useServerFn(extractNcmRowsFromPdfImages);
+
+  async function extractPdfImagesWithRetries(
+    images: PdfOcrImage[],
+    mode: "page" | "document",
+  ) {
+    let lastMessage = "Erro desconhecido";
+
+    for (let tentativa = 0; tentativa <= MAX_PDF_OCR_RETRIES; tentativa++) {
+      try {
+        return await extractPdfFn({
+          data: { images: images.slice(0, PDF_OCR_MAX_IMAGES_PER_CALL), mode },
+        });
+      } catch (error) {
+        lastMessage =
+          error instanceof Error ? error.message : "Erro desconhecido";
+        const podeTentarDeNovo =
+          tentativa < MAX_PDF_OCR_RETRIES &&
+          lastMessage.includes(RETRYABLE_ERROR_HINT);
+        if (!podeTentarDeNovo) break;
+        await sleep(RETRY_DELAY_MS);
+      }
+    }
+
+    throw new Error(lastMessage);
+  }
 
   function resetColumnMapping() {
     setRawRows(null);
@@ -705,7 +1018,11 @@ export function BatchClassifier() {
 
   // Chamado tanto pelo palpite inicial (handleFile) quanto pelos <Select>
   // de mapeamento, quando o usuário troca a coluna detectada.
-  function applyColumnMapping(sourceRows: Record<string, unknown>[], nextDescKey: string, nextNcmKey: string) {
+  function applyColumnMapping(
+    sourceRows: Record<string, unknown>[],
+    nextDescKey: string,
+    nextNcmKey: string,
+  ) {
     setDescKey(nextDescKey);
     setNcmKey(nextNcmKey);
     setRows(normalizeRows(mapRawRows(sourceRows, nextDescKey, nextNcmKey)));
@@ -715,12 +1032,18 @@ export function BatchClassifier() {
   async function handleFile(file: File) {
     try {
       const name = file.name.toLowerCase();
-      if (name.endsWith(".xlsx") || name.endsWith(".xls") || name.endsWith(".csv")) {
+      if (
+        name.endsWith(".xlsx") ||
+        name.endsWith(".xls") ||
+        name.endsWith(".csv")
+      ) {
         const buf = await file.arrayBuffer();
         const wb = XLSX.read(buf, { type: "array" });
         const parsed = parseSpreadsheetWorkbook(wb);
         if (!parsed.rawRows.length || !parsed.rows.length) {
-          toast.error("Nenhuma aba com lista de produtos foi encontrada no arquivo");
+          toast.error(
+            "Nenhuma aba com lista de produtos foi encontrada no arquivo",
+          );
           return;
         }
         setRawRows(parsed.rawRows);
@@ -729,16 +1052,86 @@ export function BatchClassifier() {
         setNcmKey(parsed.ncmKey);
         setRows(parsed.rows);
         setResults(null);
-        toast.success(`${parsed.rows.length} itens lidos de ${parsed.includedSheets.length} aba(s)`, {
-          description: `Abas usadas: ${parsed.includedSheets.join(", ")}${
-            parsed.skippedSheets.length ? ` · Abas duplicadas ignoradas: ${parsed.skippedSheets.join(", ")}` : ""
-          }`,
-        });
+        toast.success(
+          `${parsed.rows.length} itens lidos de ${parsed.includedSheets.length} aba(s)`,
+          {
+            description: `Abas usadas: ${parsed.includedSheets.join(", ")}${
+              parsed.skippedSheets.length
+                ? ` · Abas duplicadas ignoradas: ${parsed.skippedSheets.join(", ")}`
+                : ""
+            }`,
+          },
+        );
         return;
       }
       if (name.endsWith(".pdf")) {
         const text = await parsePdf(file);
-        const parsed = textToRows(text);
+        let parsed = textToRows(text);
+        let usedOcr = false;
+
+        if (!parsed.length) {
+          const toastId = toast.loading(
+            "PDF sem texto detectado. Aplicando OCR nas páginas...",
+          );
+          try {
+            const doc = await openPdfForOcr(file);
+            const pageCount = Math.min(doc.numPages, PDF_OCR_MAX_PAGES);
+            const extractedRows: InputRow[] = [];
+            const renderedImages: PdfOcrImage[] = [];
+
+            for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
+              toast.loading(
+                `Preparando OCR da página ${pageNumber} de ${pageCount}...`,
+                { id: toastId },
+              );
+              const images = await renderPdfPageForOcr(doc, pageNumber);
+              renderedImages.push(...images);
+
+              toast.loading(
+                `Extraindo itens da página ${pageNumber} de ${pageCount}...`,
+                { id: toastId },
+              );
+              const extracted = await extractPdfImagesWithRetries(
+                images,
+                "page",
+              );
+              extractedRows.push(...normalizeRows(extracted.itens));
+
+              toast.loading(
+                `${extractedRows.length} item(ns) encontrados até agora...`,
+                { id: toastId },
+              );
+            }
+
+            if (!extractedRows.length && renderedImages.length > 1) {
+              toast.loading("Tentando OCR com o documento completo...", {
+                id: toastId,
+              });
+              const extracted = await extractPdfImagesWithRetries(
+                renderedImages,
+                "document",
+              );
+              extractedRows.push(...normalizeRows(extracted.itens));
+            }
+
+            parsed = dedupeRows(extractedRows);
+            usedOcr = true;
+            toast.dismiss(toastId);
+
+            if (doc.numPages > PDF_OCR_MAX_PAGES) {
+              toast.warning(
+                `OCR aplicado nas primeiras ${PDF_OCR_MAX_PAGES} páginas`,
+                {
+                  description: `O PDF tem ${doc.numPages} páginas. Divida o arquivo se houver itens nas páginas restantes.`,
+                },
+              );
+            }
+          } catch (error) {
+            toast.dismiss(toastId);
+            throw error;
+          }
+        }
+
         if (!parsed.length) {
           toast.error("Nenhuma descrição válida encontrada no arquivo");
           return;
@@ -746,12 +1139,15 @@ export function BatchClassifier() {
         resetColumnMapping();
         setRows(parsed);
         setResults(null);
-        toast.success(`${parsed.length} itens lidos do arquivo`);
+        toast.success(
+          `${parsed.length} itens lidos do arquivo${usedOcr ? " via OCR" : ""}`,
+        );
         return;
       }
       toast.error("Formato não suportado. Use .xlsx, .csv ou .pdf");
     } catch (e) {
-      toast.error("Falha ao ler o arquivo");
+      const message = e instanceof Error ? e.message : "Erro desconhecido";
+      toast.error("Falha ao ler o arquivo", { description: message });
       console.error(e);
     }
   }
@@ -776,7 +1172,11 @@ export function BatchClassifier() {
     const acumulado: NcmBatchItem[] = [];
 
     for (let i = 0; i < lotes.length; i++) {
-      setProgress({ loteAtual: i + 1, totalLotes: lotes.length, itensFeitos: acumulado.length });
+      setProgress({
+        loteAtual: i + 1,
+        totalLotes: lotes.length,
+        itensFeitos: acumulado.length,
+      });
 
       let lastMessage = "Erro desconhecido";
       let sucesso = false;
@@ -786,15 +1186,19 @@ export function BatchClassifier() {
       // progresso já feito nos lotes anteriores.
       for (let tentativa = 0; tentativa <= MAX_LOTE_RETRIES; tentativa++) {
         try {
-          const resultado = await runFn({ data: { itens: lotes[i], operacao: "importacao" } });
+          const resultado = await runFn({
+            data: { itens: lotes[i], operacao: "importacao" },
+          });
           acumulado.push(...resultado.resultados);
           setResults([...acumulado]);
           sucesso = true;
           break;
         } catch (error) {
-          lastMessage = error instanceof Error ? error.message : "Erro desconhecido";
+          lastMessage =
+            error instanceof Error ? error.message : "Erro desconhecido";
           const podeTentarDeNovo =
-            tentativa < MAX_LOTE_RETRIES && lastMessage.includes(RETRYABLE_ERROR_HINT);
+            tentativa < MAX_LOTE_RETRIES &&
+            lastMessage.includes(RETRYABLE_ERROR_HINT);
           if (!podeTentarDeNovo) break;
           await sleep(RETRY_DELAY_MS);
         }
@@ -815,7 +1219,9 @@ export function BatchClassifier() {
 
     setIsRunning(false);
     setProgress(null);
-    toast.success(`${acumulado.length} itens classificados${lotes.length > 1 ? ` em ${lotes.length} lotes` : ""}`);
+    toast.success(
+      `${acumulado.length} itens classificados${lotes.length > 1 ? ` em ${lotes.length} lotes` : ""}`,
+    );
   }
 
   function exportXlsx() {
@@ -836,17 +1242,22 @@ export function BatchClassifier() {
     const ws = XLSX.utils.json_to_sheet(data);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Classificação");
-    XLSX.writeFile(wb, `classificacao-ncm-${new Date().toISOString().slice(0, 10)}.xlsx`);
+    XLSX.writeFile(
+      wb,
+      `classificacao-ncm-${new Date().toISOString().slice(0, 10)}.xlsx`,
+    );
   }
 
   return (
     <Card className="p-6 space-y-5">
       <div>
         <h3 className="text-lg font-semibold flex items-center gap-2">
-          <FileSpreadsheet className="h-5 w-5" /> Classificação em lote (planilha ou PDF)
+          <FileSpreadsheet className="h-5 w-5" /> Classificação em lote
+          (planilha ou PDF)
         </h3>
         <p className="text-sm text-muted-foreground mt-1">
-          Envie .xlsx, .csv ou .pdf com sua lista de produtos. A IA sugere NCM e alíquotas e marca divergências em relação ao NCM que você já tem.
+          Envie .xlsx, .csv ou .pdf com sua lista de produtos. A IA sugere NCM e
+          alíquotas e marca divergências em relação ao NCM que você já tem.
         </p>
       </div>
 
@@ -854,7 +1265,9 @@ export function BatchClassifier() {
         <div className="border-2 border-dashed border-border rounded-lg p-5 flex flex-col items-center justify-center gap-2 text-center">
           <Upload className="h-7 w-7 text-muted-foreground" />
           <div className="text-sm font-medium">Anexar arquivo</div>
-          <div className="text-xs text-muted-foreground">.xlsx, .xls, .csv ou .pdf — colunas sugeridas: Descrição e NCM</div>
+          <div className="text-xs text-muted-foreground">
+            .xlsx, .xls, .csv ou .pdf — colunas sugeridas: Descrição e NCM
+          </div>
           <input
             ref={fileRef}
             type="file"
@@ -866,22 +1279,34 @@ export function BatchClassifier() {
               e.target.value = "";
             }}
           />
-          <Button size="sm" variant="outline" onClick={() => fileRef.current?.click()}>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => fileRef.current?.click()}
+          >
             Selecionar arquivo
           </Button>
         </div>
 
         <div className="space-y-2">
           <label className="text-sm font-medium flex items-center gap-2">
-            <FileText className="h-4 w-4" /> Ou cole uma lista (uma linha por item)
+            <FileText className="h-4 w-4" /> Ou cole uma lista (uma linha por
+            item)
           </label>
           <Textarea
             rows={5}
             value={pasted}
             onChange={(e) => setPasted(e.target.value)}
-            placeholder={"Ex.:\nChocolate ao leite barra 100g\nMouse óptico USB - 8471.60.53\nCafé torrado em grãos 1kg"}
+            placeholder={
+              "Ex.:\nChocolate ao leite barra 100g\nMouse óptico USB - 8471.60.53\nCafé torrado em grãos 1kg"
+            }
           />
-          <Button size="sm" variant="outline" onClick={loadPasted} disabled={!pasted.trim()}>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={loadPasted}
+            disabled={!pasted.trim()}
+          >
             Carregar lista
           </Button>
         </div>
@@ -890,12 +1315,20 @@ export function BatchClassifier() {
       {rawRows && columns.length > 0 && (
         <div className="grid sm:grid-cols-2 gap-3 border rounded-md p-3 bg-muted/20">
           <p className="text-xs text-muted-foreground sm:col-span-2">
-            Detectamos as colunas abaixo automaticamente pelo conteúdo da planilha — como o formato varia de arquivo
-            pra arquivo, confira e troque se não bater com a sua.
+            Detectamos as colunas abaixo automaticamente pelo conteúdo da
+            planilha — como o formato varia de arquivo pra arquivo, confira e
+            troque se não bater com a sua.
           </p>
           <div className="space-y-1.5">
-            <label className="text-xs font-medium">Coluna de descrição do produto</label>
-            <Select value={descKey} onValueChange={(value) => applyColumnMapping(rawRows, value, ncmKey)}>
+            <label className="text-xs font-medium">
+              Coluna de descrição do produto
+            </label>
+            <Select
+              value={descKey}
+              onValueChange={(value) =>
+                applyColumnMapping(rawRows, value, ncmKey)
+              }
+            >
               <SelectTrigger className="h-9">
                 <SelectValue />
               </SelectTrigger>
@@ -909,8 +1342,15 @@ export function BatchClassifier() {
             </Select>
           </div>
           <div className="space-y-1.5">
-            <label className="text-xs font-medium">Coluna de NCM já informado (opcional)</label>
-            <Select value={ncmKey} onValueChange={(value) => applyColumnMapping(rawRows, descKey, value)}>
+            <label className="text-xs font-medium">
+              Coluna de NCM já informado (opcional)
+            </label>
+            <Select
+              value={ncmKey}
+              onValueChange={(value) =>
+                applyColumnMapping(rawRows, descKey, value)
+              }
+            >
               <SelectTrigger className="h-9">
                 <SelectValue />
               </SelectTrigger>
@@ -930,16 +1370,18 @@ export function BatchClassifier() {
       {rows.length > 0 && (
         <div className="flex items-center justify-between border rounded-md p-3 bg-secondary/30">
           <div className="text-sm">
-            <span className="font-medium">{rows.length}</span> itens prontos para classificar
+            <span className="font-medium">{rows.length}</span> itens prontos
+            para classificar
             {rows.length > MAX_BATCH && (
               <span className="text-muted-foreground ml-2">
-                (processado em {Math.ceil(rows.length / MAX_BATCH)} lotes de até {MAX_BATCH})
+                (processado em {Math.ceil(rows.length / MAX_BATCH)} lotes de até{" "}
+                {MAX_BATCH})
               </span>
             )}
             {progress && (
               <div className="text-xs text-muted-foreground mt-1">
-                Lote {progress.loteAtual} de {progress.totalLotes} — {progress.itensFeitos} de {rows.length} itens
-                classificados
+                Lote {progress.loteAtual} de {progress.totalLotes} —{" "}
+                {progress.itensFeitos} de {rows.length} itens classificados
               </div>
             )}
           </div>
@@ -957,7 +1399,9 @@ export function BatchClassifier() {
               <Trash2 className="h-4 w-4 mr-1" /> Limpar
             </Button>
             <Button size="sm" onClick={runAll} disabled={isRunning}>
-              {isRunning ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null}
+              {isRunning ? (
+                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+              ) : null}
               Classificar {rows.length}
             </Button>
           </div>
@@ -968,7 +1412,8 @@ export function BatchClassifier() {
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <div className="text-sm text-muted-foreground">
-              {results.filter((r) => r.divergencia).length} divergência(s) detectada(s)
+              {results.filter((r) => r.divergencia).length} divergência(s)
+              detectada(s)
             </div>
             <Button size="sm" variant="outline" onClick={exportXlsx}>
               <Download className="h-4 w-4 mr-1" /> Exportar XLSX
@@ -991,13 +1436,21 @@ export function BatchClassifier() {
               </thead>
               <tbody>
                 {results.map((r, i) => (
-                  <tr key={i} className={`border-t ${r.divergencia ? "bg-destructive/5" : ""}`}>
-                    <td className="p-2 max-w-[220px]">{r.descricao_original}</td>
+                  <tr
+                    key={i}
+                    className={`border-t ${r.divergencia ? "bg-destructive/5" : ""}`}
+                  >
+                    <td className="p-2 max-w-[220px]">
+                      {r.descricao_original}
+                    </td>
                     <td className="p-2 font-mono">{r.ncm_informado || "—"}</td>
                     <td className="p-2 font-mono font-semibold">
                       {r.ncm_sugerido}
                       {r.divergencia ? (
-                        <Badge variant="destructive" className="ml-1 text-[10px]">
+                        <Badge
+                          variant="destructive"
+                          className="ml-1 text-[10px]"
+                        >
                           <AlertTriangle className="h-3 w-3 mr-0.5" /> diverge
                         </Badge>
                       ) : r.ncm_informado ? (
@@ -1010,8 +1463,12 @@ export function BatchClassifier() {
                     <td className="p-2">{r.ii}</td>
                     <td className="p-2">{r.ipi}</td>
                     <td className="p-2">{r.pis_cofins}</td>
-                    <td className="p-2 max-w-[160px]">{r.tratamento_administrativo}</td>
-                    <td className="p-2 max-w-[220px] text-muted-foreground">{r.observacao}</td>
+                    <td className="p-2 max-w-[160px]">
+                      {r.tratamento_administrativo}
+                    </td>
+                    <td className="p-2 max-w-[220px] text-muted-foreground">
+                      {r.observacao}
+                    </td>
                   </tr>
                 ))}
               </tbody>

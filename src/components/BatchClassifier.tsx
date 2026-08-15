@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Select,
   SelectContent,
@@ -30,6 +31,7 @@ import {
 import { toast } from "sonner";
 
 type InputRow = { descricao: string; ncm_informado: string };
+type Operacao = "importacao" | "exportacao" | "ambos";
 type PdfTextToken = {
   text: string;
   x: number;
@@ -1029,6 +1031,8 @@ export function BatchClassifier() {
   const [rows, setRows] = useState<InputRow[]>([]);
   const [results, setResults] = useState<NcmBatchItem[] | null>(null);
   const [pasted, setPasted] = useState("");
+  const [contexto, setContexto] = useState("");
+  const [operacao, setOperacao] = useState<Operacao>("importacao");
   const [isRunning, setIsRunning] = useState(false);
   const [progress, setProgress] = useState<{
     loteAtual: number;
@@ -1251,7 +1255,11 @@ export function BatchClassifier() {
       for (let tentativa = 0; tentativa <= MAX_LOTE_RETRIES; tentativa++) {
         try {
           const resultado = await runFn({
-            data: { itens: lotes[i], operacao: "importacao" },
+            data: {
+              itens: lotes[i],
+              operacao,
+              contexto,
+            },
           });
           acumulado.push(...resultado.resultados);
           setResults([...acumulado]);
@@ -1373,6 +1381,41 @@ export function BatchClassifier() {
           >
             Carregar lista
           </Button>
+        </div>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-[auto_1fr] md:items-start">
+        <div className="space-y-2">
+          <label className="text-sm font-medium">Operação</label>
+          <Tabs
+            value={operacao}
+            onValueChange={(value) => setOperacao(value as Operacao)}
+          >
+            <TabsList className="bg-secondary">
+              <TabsTrigger value="importacao" disabled={isRunning}>
+                Importação
+              </TabsTrigger>
+              <TabsTrigger value="exportacao" disabled={isRunning}>
+                Exportação
+              </TabsTrigger>
+              <TabsTrigger value="ambos" disabled={isRunning}>
+                Ambos
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+        </div>
+
+        <div className="space-y-2">
+          <label className="text-sm font-medium">
+            Contexto geral da classificação
+          </label>
+          <Textarea
+            rows={3}
+            value={contexto}
+            onChange={(e) => setContexto(e.target.value)}
+            placeholder="Ex.: produtos para revenda hospitalar; uso industrial; componentes elétricos para painéis de comando; origem China; tensão 220V; material predominante plástico e metal."
+            disabled={isRunning}
+          />
         </div>
       </div>
 

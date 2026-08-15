@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { GoogleGenAI, Type } from "@google/genai";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 const MAX_DESCRICAO_IA = 1800;
 const GEMINI_MODEL = "gemini-3.5-flash";
@@ -69,6 +70,14 @@ const ExtractedPdfItemsSchema = z.object({
 
 export type NcmBatchResult = z.infer<typeof ResultSchema>;
 export type NcmBatchItem = z.infer<typeof ResultItemSchema>;
+
+type NcmTributoRow = {
+  ncm: string;
+  aliquota_ii: number | null;
+  aliquota_ipi: number | null;
+  aliquota_pis: number | null;
+  aliquota_cofins: number | null;
+};
 
 const geminiResponseSchema = {
   type: Type.OBJECT,
@@ -168,6 +177,89 @@ function handleGeminiError(
   throw new Error(`Erro na ${operation}: ${message}`);
 }
 
+function normalizeNcm(value: string) {
+  const digits = value.replace(/\D/g, "");
+  return digits.length === 8 ? digits : "";
+}
+
+function formatAliquota(value: number | null | undefined, emptyValue = "n/a") {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return emptyValue;
+  }
+
+  return `${new Intl.NumberFormat("pt-BR", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value)}%`;
+}
+
+function formatPisCofins(row: NcmTributoRow) {
+  const pis = formatAliquota(row.aliquota_pis);
+  const cofins = formatAliquota(row.aliquota_cofins);
+
+  return `PIS ${pis} / COFINS ${cofins}`;
+}
+
+function appendObservation(observacao: string, addition: string) {
+  const trimmed = observacao.trim();
+  return trimmed ? `${trimmed} ${addition}` : addition;
+}
+
+async function applyOfficialTributos(
+  parsed: NcmBatchResult,
+): Promise<NcmBatchResult> {
+  const ncms = Array.from(
+    new Set(
+      parsed.resultados
+        .map((result) => normalizeNcm(result.ncm_sugerido))
+        .filter(Boolean),
+    ),
+  );
+
+  if (!ncms.length) return parsed;
+
+  const { data, error } = await (supabaseAdmin as any)
+    .from("ncm_tributos")
+    .select("ncm, aliquota_ii, aliquota_ipi, aliquota_pis, aliquota_cofins")
+    .in("ncm", ncms);
+
+  if (error) {
+    throw new Error(`Erro ao consultar ncm_tributos: ${error.message}`);
+  }
+
+  const tributosByNcm = new Map<string, NcmTributoRow>(
+    ((data ?? []) as NcmTributoRow[]).map((row) => [normalizeNcm(row.ncm), row]),
+  );
+
+  return {
+    ...parsed,
+    resultados: parsed.resultados.map((result) => {
+      const ncm = normalizeNcm(result.ncm_sugerido);
+      const tributo = tributosByNcm.get(ncm);
+
+      if (!tributo) {
+        return {
+          ...result,
+          ii: "não encontrado",
+          ipi: "não encontrado",
+          pis_cofins: "não encontrado",
+          observacao: appendObservation(
+            result.observacao,
+            "Alíquotas não encontradas na tabela ncm_tributos.",
+          ),
+        };
+      }
+
+      return {
+        ...result,
+        ii: formatAliquota(tributo.aliquota_ii),
+        ipi: formatAliquota(tributo.aliquota_ipi, "NT"),
+        pis_cofins: formatPisCofins(tributo),
+      };
+    }),
+  };
+}
+
 export const extractNcmRowsFromPdfImages = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => PdfOcrInputSchema.parse(input))
@@ -246,7 +338,7 @@ export const classifyNcmBatch = createServerFn({ method: "POST" })
     const systemPrompt = `Você é auditor-fiscal especialista em NCM/TEC Mercosul e Siscomex. Receberá uma LISTA de itens (descrição do produto, e opcionalmente o NCM já informado pelo usuário). Para cada item:
 1. Aplique RGI 1/3/6 e identifique a NCM mais provável (8 dígitos no formato XXXX.XX.XX).
 2. Se o usuário informou um NCM, compare. Marque divergencia=true quando os 8 dígitos diferirem.
-3. Informe alíquotas APROXIMADAS da TEC vigente: II (%), IPI (%), PIS/COFINS importação (%). Use "n/a" quando não aplicável.
+3. Preencha II, IPI e PIS/COFINS como "n/a"; o sistema consultará a tabela ncm_tributos após a classificação para aplicar as alíquotas oficiais.
 4. Informe tratamento administrativo (Anvisa, Inmetro, MAPA, Anatel, Decex, Exército, IBAMA, ANP) ou "Não há".
 5. Observação curta: risco fiscal, atributo decisivo ou pergunta-chave.
 6. Mantenha descrição original exatamente como recebida em descricao_original.
@@ -286,7 +378,8 @@ REGRAS:
         throw new Error("Resposta da IA retornou vazia.");
       }
 
-      return ResultSchema.parse(JSON.parse(responseText));
+      const parsed = ResultSchema.parse(JSON.parse(responseText));
+      return await applyOfficialTributos(parsed);
     } catch (error: any) {
       // Mensagem reconhecida pelo client (BatchClassifier.runAll) pra
       // decidir se tenta o lote de novo automaticamente.

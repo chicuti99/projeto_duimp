@@ -9,6 +9,9 @@ import {
 } from "@tanstack/react-router";
 
 import appCss from "../styles.css?url";
+import { installStaleAssetRecovery } from "@/lib/stale-asset-recovery";
+
+installStaleAssetRecovery();
 
 function NotFoundComponent() {
   return (

@@ -56,10 +56,15 @@ const PdfOcrInputSchema = z.object({
 
 const ResultItemSchema = z.object({
   descricao_original: z.string(),
+  natureza_funcional: z.string(),
+  nivel_dados: z.enum(["insuficiente", "basico", "razoavel", "completo"]),
+  confianca_maxima_permitida: z.enum(["baixa", "media", "alta", "muito_alta"]),
   ncm_informado: z.string(),
   ncm_sugerido: z.string().describe("NCM 8 dígitos XXXX.XX.XX"),
   descricao_ncm: z.string(),
+  capitulo: z.string(),
   confianca: z.enum(["muito_alta", "alta", "media", "baixa"]),
+  nivel_risco: z.enum(["baixo", "medio", "alto"]),
   divergencia: z
     .boolean()
     .describe(
@@ -70,6 +75,14 @@ const ResultItemSchema = z.object({
   pis_cofins: z.string(),
   tratamento_administrativo: z.string(),
   observacao: z.string(),
+  analise_rgi: z.string(),
+  justificativa: z.string(),
+  justificativa_auditavel: z.string(),
+  descricao_li: z.string(),
+  descricao_duimp: z.string(),
+  perguntas_obrigatorias: z.array(z.string()),
+  falsos_cognatos_alertados: z.array(z.string()),
+  alertas: z.array(z.string()),
 });
 
 const ResultSchema = z.object({
@@ -102,32 +115,70 @@ const geminiResponseSchema = {
         type: Type.OBJECT,
         properties: {
           descricao_original: { type: Type.STRING },
+          natureza_funcional: { type: Type.STRING },
+          nivel_dados: {
+            type: Type.STRING,
+            enum: ["insuficiente", "basico", "razoavel", "completo"],
+          },
+          confianca_maxima_permitida: {
+            type: Type.STRING,
+            enum: ["baixa", "media", "alta", "muito_alta"],
+          },
           ncm_informado: { type: Type.STRING },
           ncm_sugerido: { type: Type.STRING },
           descricao_ncm: { type: Type.STRING },
+          capitulo: { type: Type.STRING },
           confianca: {
             type: Type.STRING,
             enum: ["muito_alta", "alta", "media", "baixa"],
           },
+          nivel_risco: { type: Type.STRING, enum: ["baixo", "medio", "alto"] },
           divergencia: { type: Type.BOOLEAN },
           ii: { type: Type.STRING },
           ipi: { type: Type.STRING },
           pis_cofins: { type: Type.STRING },
           tratamento_administrativo: { type: Type.STRING },
           observacao: { type: Type.STRING },
+          analise_rgi: { type: Type.STRING },
+          justificativa: { type: Type.STRING },
+          justificativa_auditavel: { type: Type.STRING },
+          descricao_li: { type: Type.STRING },
+          descricao_duimp: { type: Type.STRING },
+          perguntas_obrigatorias: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+          },
+          falsos_cognatos_alertados: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+          },
+          alertas: { type: Type.ARRAY, items: { type: Type.STRING } },
         },
         required: [
           "descricao_original",
+          "natureza_funcional",
+          "nivel_dados",
+          "confianca_maxima_permitida",
           "ncm_informado",
           "ncm_sugerido",
           "descricao_ncm",
+          "capitulo",
           "confianca",
+          "nivel_risco",
           "divergencia",
           "ii",
           "ipi",
           "pis_cofins",
           "tratamento_administrativo",
           "observacao",
+          "analise_rgi",
+          "justificativa",
+          "justificativa_auditavel",
+          "descricao_li",
+          "descricao_duimp",
+          "perguntas_obrigatorias",
+          "falsos_cognatos_alertados",
+          "alertas",
         ],
       },
     },
@@ -241,7 +292,10 @@ async function applyOfficialTributos(
   }
 
   const tributosByNcm = new Map<string, NcmTributoRow>(
-    ((data ?? []) as NcmTributoRow[]).map((row) => [normalizeNcm(row.ncm), row]),
+    ((data ?? []) as NcmTributoRow[]).map((row) => [
+      normalizeNcm(row.ncm),
+      row,
+    ]),
   );
 
   return {
@@ -348,19 +402,26 @@ export const classifyNcmBatch = createServerFn({ method: "POST" })
     // (1 min) usado na classificação individual.
     const ai = getGeminiClient(90_000);
 
-    const systemPrompt = `Você é auditor-fiscal especialista em NCM/TEC Mercosul e Siscomex. Receberá uma LISTA de itens (descrição do produto, e opcionalmente o NCM já informado pelo usuário). Para cada item:
-1. Aplique RGI 1/3/6 e identifique a NCM mais provável (8 dígitos no formato XXXX.XX.XX).
-2. Se o usuário informou um NCM, compare. Marque divergencia=true quando os 8 dígitos diferirem.
-3. Preencha II, IPI e PIS/COFINS como "n/a"; o sistema consultará a tabela ncm_tributos após a classificação para aplicar as alíquotas oficiais.
-4. Informe tratamento administrativo (Anvisa, Inmetro, MAPA, Anatel, Decex, Exército, IBAMA, ANP) ou "Não há".
-5. Observação curta: risco fiscal, atributo decisivo ou pergunta-chave.
-6. Mantenha descrição original exatamente como recebida em descricao_original.
+    const systemPrompt = `Você é auditor-fiscal especialista em classificação de mercadorias (NCM/SH/TEC Mercosul), Siscomex (DUIMP, Catálogo de Produtos, LI/LPCO), órgãos anuentes (RFB, Anvisa, Inmetro, MAPA, Anatel, Decex, Exército, IBAMA, ANP) e RGI/NESH.
+
+Receberá uma LISTA de itens extraídos de planilha, invoice, proforma, packing list, cotação ou texto colado. Para cada item, retorne um resultado completo no mesmo padrão da classificação individual:
+1. Identifique natureza_funcional, setor SH, capítulo, NCM provável e descrição oficial.
+2. Aplique RGI 1/3/6 explicitamente em analise_rgi e justificativa_auditavel.
+3. Se o usuário informou um NCM, compare. Marque divergencia=true quando os 8 dígitos diferirem.
+4. Preencha II, IPI e PIS/COFINS como "n/a"; o sistema consultará a tabela ncm_tributos depois para aplicar as alíquotas oficiais.
+5. Informe tratamento_administrativo (Anvisa, Inmetro, MAPA, Anatel, Decex, Exército, IBAMA, ANP) ou "Não há".
+6. Gere descricao_li completa e descricao_duimp detalhada para cada linha, usando marca, modelo, fabricante, material, uso, dimensões, tensão, composição, aplicação e demais atributos que existirem na descrição, NCM informado ou contexto.
+7. Mantenha descricao_original exatamente como recebida.
 
 REGRAS:
 - Se a descrição for vaga, escolha a NCM mais provável mas use confianca="baixa" e explique na observação.
-- Não invente alíquotas extremas; se incerto use faixa (ex.: "14-16%").
+- Respeite o teto de confiança: descrição curta/nome comercial não passa de "media"; com ficha técnica/atributos pode chegar a "alta"; manual/catálogo/composição completa pode chegar a "muito_alta".
+- Defina nivel_dados como "insuficiente", "basico", "razoavel" ou "completo" exatamente nesses valores sem acento.
+- Popule perguntas_obrigatorias quando faltarem dados críticos antes de operar com o NCM.
+- Alerte falsos cognatos fiscais quando aplicável: "respiratório" ≠ terapêutico; "eletrônico" nem sempre cap. 85; "sensor" pode ser cap. 90; "industrial" nem sempre é máquina.
 - Use formato exato XXXX.XX.XX nos NCMs.
-- Retorne EXATAMENTE um resultado por item de entrada, na mesma ordem.`;
+- Retorne EXATAMENTE um resultado por item de entrada, na mesma ordem.
+- Responda estritamente no JSON solicitado.`;
 
     const lista = data.itens
       .map(

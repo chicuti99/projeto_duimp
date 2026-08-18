@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { Fragment, useRef, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
 import * as XLSX from "xlsx";
 import {
@@ -65,10 +65,9 @@ type SpreadsheetParseResult = {
   skippedSheets: string[];
 };
 
-// Tamanho máximo aceito por chamada à IA (ncm-batch.functions.ts limita a
-// 50 no input validator). Arquivos maiores são divididos em vários lotes
-// desse tamanho e processados um atrás do outro — ver runAll().
-const MAX_BATCH = 50;
+// O server aceita até 50, mas o retorno agora inclui descrição LI/DUIMP e
+// justificativa por item. Lotes menores evitam resposta gigante/timeout.
+const MAX_BATCH = 15;
 const MAX_DESCRIPTION_CHARS = 1800;
 
 // Mensagens que ncm-batch.functions.ts usa pra erros que valem retry
@@ -1296,20 +1295,37 @@ export function BatchClassifier() {
     );
   }
 
+  function formatResultList(items: string[]) {
+    return items.filter(Boolean).join("\n");
+  }
+
   function exportXlsx() {
     if (!results) return;
     const data = results.map((r) => ({
       Descrição: r.descricao_original,
+      "Natureza funcional": r.natureza_funcional,
+      "Qualidade dos dados": r.nivel_dados,
+      "Teto de confiança": r.confianca_maxima_permitida,
       "NCM informado": r.ncm_informado,
       "NCM sugerido": r.ncm_sugerido,
       "Descrição NCM": r.descricao_ncm,
+      Capítulo: r.capitulo,
       Confiança: r.confianca,
+      "Risco fiscal": r.nivel_risco,
       Divergência: r.divergencia ? "SIM" : "não",
       II: r.ii,
       IPI: r.ipi,
       "PIS/COFINS": r.pis_cofins,
       "Tratamento administrativo": r.tratamento_administrativo,
       Observação: r.observacao,
+      "Análise RGI": r.analise_rgi,
+      Justificativa: r.justificativa,
+      "Justificativa auditável": r.justificativa_auditavel,
+      "Descrição sugerida LI": r.descricao_li,
+      "Descrição sugerida DUIMP": r.descricao_duimp,
+      "Perguntas obrigatórias": formatResultList(r.perguntas_obrigatorias),
+      "Falsos cognatos": formatResultList(r.falsos_cognatos_alertados),
+      Alertas: formatResultList(r.alertas),
     }));
     const ws = XLSX.utils.json_to_sheet(data);
     const wb = XLSX.utils.book_new();
@@ -1558,40 +1574,101 @@ export function BatchClassifier() {
               </thead>
               <tbody>
                 {results.map((r, i) => (
-                  <tr
-                    key={i}
-                    className={`border-t ${r.divergencia ? "bg-destructive/5" : ""}`}
-                  >
-                    <td className="p-2 max-w-[220px]">
-                      {r.descricao_original}
-                    </td>
-                    <td className="p-2 font-mono">{r.ncm_informado || "—"}</td>
-                    <td className="p-2 font-mono font-semibold">
-                      {r.ncm_sugerido}
-                      {r.divergencia ? (
-                        <Badge
-                          variant="destructive"
-                          className="ml-1 text-[10px]"
-                        >
-                          <AlertTriangle className="h-3 w-3 mr-0.5" /> diverge
-                        </Badge>
-                      ) : r.ncm_informado ? (
-                        <Badge variant="secondary" className="ml-1 text-[10px]">
-                          <CheckCircle2 className="h-3 w-3 mr-0.5" /> ok
-                        </Badge>
-                      ) : null}
-                    </td>
-                    <td className="p-2">{r.confianca}</td>
-                    <td className="p-2">{r.ii}</td>
-                    <td className="p-2">{r.ipi}</td>
-                    <td className="p-2">{r.pis_cofins}</td>
-                    <td className="p-2 max-w-[160px]">
-                      {r.tratamento_administrativo}
-                    </td>
-                    <td className="p-2 max-w-[220px] text-muted-foreground">
-                      {r.observacao}
-                    </td>
-                  </tr>
+                  <Fragment key={i}>
+                    <tr
+                      className={`border-t ${r.divergencia ? "bg-destructive/5" : ""}`}
+                    >
+                      <td className="p-2 max-w-[220px]">
+                        {r.descricao_original}
+                      </td>
+                      <td className="p-2 font-mono">
+                        {r.ncm_informado || "—"}
+                      </td>
+                      <td className="p-2 font-mono font-semibold">
+                        {r.ncm_sugerido}
+                        {r.divergencia ? (
+                          <Badge
+                            variant="destructive"
+                            className="ml-1 text-[10px]"
+                          >
+                            <AlertTriangle className="h-3 w-3 mr-0.5" /> diverge
+                          </Badge>
+                        ) : r.ncm_informado ? (
+                          <Badge
+                            variant="secondary"
+                            className="ml-1 text-[10px]"
+                          >
+                            <CheckCircle2 className="h-3 w-3 mr-0.5" /> ok
+                          </Badge>
+                        ) : null}
+                        <div className="mt-1 text-[10px] font-normal text-muted-foreground">
+                          {r.capitulo}
+                        </div>
+                      </td>
+                      <td className="p-2">
+                        <div>{r.confianca}</div>
+                        <div className="text-[10px] text-muted-foreground">
+                          dados: {r.nivel_dados}
+                        </div>
+                      </td>
+                      <td className="p-2">{r.ii}</td>
+                      <td className="p-2">{r.ipi}</td>
+                      <td className="p-2">{r.pis_cofins}</td>
+                      <td className="p-2 max-w-[160px]">
+                        {r.tratamento_administrativo}
+                      </td>
+                      <td className="p-2 max-w-[220px] text-muted-foreground">
+                        {r.observacao}
+                      </td>
+                    </tr>
+                    <tr className="border-t bg-muted/10">
+                      <td colSpan={9} className="p-3">
+                        <div className="grid gap-3 md:grid-cols-2">
+                          <BatchDetailBlock
+                            title="Descrição sugerida — LI"
+                            text={r.descricao_li}
+                          />
+                          <BatchDetailBlock
+                            title="Descrição sugerida — DUIMP / Catálogo"
+                            text={r.descricao_duimp}
+                          />
+                          <BatchDetailBlock
+                            title="Justificativa"
+                            text={r.justificativa}
+                          />
+                          <BatchDetailBlock
+                            title="Justificativa auditável / RGI"
+                            text={`${r.justificativa_auditavel}\n\n${r.analise_rgi}`}
+                          />
+                        </div>
+
+                        {(r.perguntas_obrigatorias.length > 0 ||
+                          r.falsos_cognatos_alertados.length > 0 ||
+                          r.alertas.length > 0) && (
+                          <div className="mt-3 grid gap-2 md:grid-cols-3">
+                            {r.perguntas_obrigatorias.length > 0 && (
+                              <BatchListBlock
+                                title="Perguntas obrigatórias"
+                                items={r.perguntas_obrigatorias}
+                              />
+                            )}
+                            {r.falsos_cognatos_alertados.length > 0 && (
+                              <BatchListBlock
+                                title="Falsos cognatos"
+                                items={r.falsos_cognatos_alertados}
+                              />
+                            )}
+                            {r.alertas.length > 0 && (
+                              <BatchListBlock
+                                title="Alertas"
+                                items={r.alertas}
+                              />
+                            )}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  </Fragment>
                 ))}
               </tbody>
             </table>
@@ -1599,5 +1676,29 @@ export function BatchClassifier() {
         </div>
       )}
     </Card>
+  );
+}
+
+function BatchDetailBlock({ title, text }: { title: string; text: string }) {
+  return (
+    <div className="rounded-md border border-border/70 bg-background p-3">
+      <div className="mb-1 text-xs font-semibold">{title}</div>
+      <p className="whitespace-pre-wrap text-xs leading-5 text-muted-foreground">
+        {text || "—"}
+      </p>
+    </div>
+  );
+}
+
+function BatchListBlock({ title, items }: { title: string; items: string[] }) {
+  return (
+    <div className="rounded-md border border-border/70 bg-background p-3">
+      <div className="mb-1 text-xs font-semibold">{title}</div>
+      <ul className="space-y-1 text-xs leading-5 text-muted-foreground">
+        {items.map((item, index) => (
+          <li key={index}>• {item}</li>
+        ))}
+      </ul>
+    </div>
   );
 }

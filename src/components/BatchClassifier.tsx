@@ -1324,12 +1324,13 @@ export function BatchClassifier() {
     <Card className="p-6 space-y-5">
       <div>
         <h3 className="text-lg font-semibold flex items-center gap-2">
-          <FileSpreadsheet className="h-5 w-5" /> Classificação em lote
-          (planilha ou PDF)
+          <FileSpreadsheet className="h-5 w-5" /> Classificação em lote de
+          produtos
         </h3>
         <p className="text-sm text-muted-foreground mt-1">
-          Envie .xlsx, .csv ou .pdf com sua lista de produtos. A IA sugere NCM e
-          alíquotas e marca divergências em relação ao NCM que você já tem.
+          Envie .xlsx, .csv ou .pdf quando o arquivo tiver uma lista com vários
+          produtos. Manual, ficha técnica ou foto de um único item devem ser
+          anexados na classificação individual.
         </p>
       </div>
 
@@ -1338,7 +1339,8 @@ export function BatchClassifier() {
           <Upload className="h-7 w-7 text-muted-foreground" />
           <div className="text-sm font-medium">Anexar arquivo</div>
           <div className="text-xs text-muted-foreground">
-            .xlsx, .xls, .csv ou .pdf — colunas sugeridas: Descrição e NCM
+            Lista em .xlsx, .xls, .csv ou .pdf — colunas sugeridas: Descrição e
+            NCM
           </div>
           <input
             ref={fileRef}
@@ -1352,6 +1354,7 @@ export function BatchClassifier() {
             }}
           />
           <Button
+            type="button"
             size="sm"
             variant="outline"
             onClick={() => fileRef.current?.click()}
@@ -1374,6 +1377,7 @@ export function BatchClassifier() {
             }
           />
           <Button
+            type="button"
             size="sm"
             variant="outline"
             onClick={loadPasted}
@@ -1494,6 +1498,7 @@ export function BatchClassifier() {
           </div>
           <div className="flex gap-2">
             <Button
+              type="button"
               size="sm"
               variant="ghost"
               onClick={() => {
@@ -1503,9 +1508,14 @@ export function BatchClassifier() {
               }}
               disabled={isRunning}
             >
-              <Trash2 className="h-4 w-4 mr-1" /> Limpar
+              <Trash2 className="h-4 w-4 mr-1" /> Limpar lote
             </Button>
-            <Button size="sm" onClick={runAll} disabled={isRunning}>
+            <Button
+              type="button"
+              size="sm"
+              onClick={runAll}
+              disabled={isRunning}
+            >
               {isRunning ? (
                 <Loader2 className="h-4 w-4 mr-1 animate-spin" />
               ) : null}
@@ -1522,7 +1532,12 @@ export function BatchClassifier() {
               {results.filter((r) => r.divergencia).length} divergência(s)
               detectada(s)
             </div>
-            <Button size="sm" variant="outline" onClick={exportXlsx}>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={exportXlsx}
+            >
               <Download className="h-4 w-4 mr-1" /> Exportar XLSX
             </Button>
           </div>

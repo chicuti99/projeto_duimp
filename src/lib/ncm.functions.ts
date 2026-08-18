@@ -40,6 +40,32 @@ const AttachmentSchema = z.object({
     .regex(/^[A-Za-z0-9+/]+={0,2}$/),
 });
 
+const INPUT_FIELD_LABELS: Record<string, string> = {
+  query: "Descrição do produto",
+  "atributos.finalidade": "Finalidade principal",
+  "atributos.principio_funcional": "Princípio funcional",
+  "atributos.composicao_material": "Composição / material",
+  "atributos.marca": "Marca",
+  "atributos.modelo": "Modelo",
+  "atributos.fabricante": "Fabricante",
+  "atributos.pais_origem": "País de origem",
+};
+
+function formatInputValidationError(error: z.ZodError) {
+  const messages = error.issues.map((issue) => {
+    const path = issue.path.join(".");
+    const label = (INPUT_FIELD_LABELS[path] ?? path) || "Campo";
+
+    if (issue.code === "too_big" && issue.origin === "string") {
+      return `${label}: máximo de ${issue.maximum} caracteres.`;
+    }
+
+    return `${label}: ${issue.message}`;
+  });
+
+  return `Revise os dados informados. ${messages.join(" ")}`;
+}
+
 const InputSchema = z.object({
   query: z.string().min(2).max(500),
   operation: z.enum(["importacao", "exportacao", "ambos"]).default("ambos"),
@@ -267,7 +293,13 @@ const geminiResponseSchema = {
 
 export const classifyNcm = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: unknown) => InputSchema.parse(input))
+  .inputValidator((input: unknown) => {
+    const result = InputSchema.safeParse(input);
+    if (!result.success) {
+      throw new Error(formatInputValidationError(result.error));
+    }
+    return result.data;
+  })
   .handler(async ({ data }) => {
     const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
     if (!GEMINI_API_KEY) {

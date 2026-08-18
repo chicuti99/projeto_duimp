@@ -150,6 +150,15 @@ const ATRIBUTOS_INICIAIS: Atributos = {
 
 const MAX_ATTACHMENTS = 2;
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+const ATTRIBUTE_LIMITS: Partial<Record<keyof Atributos, number>> = {
+  finalidade: 300,
+  principio_funcional: 300,
+  composicao_material: 300,
+  marca: 120,
+  modelo: 120,
+  fabricante: 160,
+  pais_origem: 80,
+} satisfies Partial<Record<keyof Atributos, number>>;
 const SUPPORTED_ATTACHMENT_TYPES = [
   "application/pdf",
   "image/jpeg",
@@ -198,6 +207,29 @@ function riskColor(r: string) {
   return "bg-muted text-muted-foreground";
 }
 
+function normalizeAtributos(atributos: Atributos): Atributos {
+  return {
+    ...atributos,
+    finalidade: atributos.finalidade
+      .trim()
+      .slice(0, ATTRIBUTE_LIMITS.finalidade),
+    principio_funcional: atributos.principio_funcional
+      .trim()
+      .slice(0, ATTRIBUTE_LIMITS.principio_funcional),
+    composicao_material: atributos.composicao_material
+      .trim()
+      .slice(0, ATTRIBUTE_LIMITS.composicao_material),
+    marca: atributos.marca.trim().slice(0, ATTRIBUTE_LIMITS.marca),
+    modelo: atributos.modelo.trim().slice(0, ATTRIBUTE_LIMITS.modelo),
+    fabricante: atributos.fabricante
+      .trim()
+      .slice(0, ATTRIBUTE_LIMITS.fabricante),
+    pais_origem: atributos.pais_origem
+      .trim()
+      .slice(0, ATTRIBUTE_LIMITS.pais_origem),
+  };
+}
+
 export function NcmClassifier() {
   const [query, setQuery] = useState("");
   const [operation, setOperation] = useState<
@@ -221,7 +253,7 @@ export function NcmClassifier() {
           query: q,
           operation,
           natureza,
-          atributos,
+          atributos: normalizeAtributos(atributos),
           anexos: attachments.map(({ name, mimeType, data }) => ({
             name,
             mimeType,
@@ -323,7 +355,13 @@ export function NcmClassifier() {
   };
 
   const toggleAttr = (k: keyof Atributos) => (v: boolean | string) =>
-    setAtributos((p) => ({ ...p, [k]: v as never }));
+    setAtributos((p) => ({
+      ...p,
+      [k]:
+        typeof v === "string" && ATTRIBUTE_LIMITS[k]
+          ? v.slice(0, ATTRIBUTE_LIMITS[k])
+          : (v as never),
+    }));
 
   return (
     <div className="w-full max-w-5xl mx-auto">
@@ -546,39 +584,46 @@ export function NcmClassifier() {
                 label="Finalidade principal"
                 value={atributos.finalidade}
                 onChange={(v) => toggleAttr("finalidade")(v)}
+                maxLength={ATTRIBUTE_LIMITS.finalidade}
                 placeholder="ex.: medir capacidade pulmonar"
               />
               <TextAttr
                 label="Princípio funcional"
                 value={atributos.principio_funcional}
                 onChange={(v) => toggleAttr("principio_funcional")(v)}
+                maxLength={ATTRIBUTE_LIMITS.principio_funcional}
                 placeholder="ex.: turbina + sensor de fluxo"
               />
               <TextAttr
                 label="Composição / material"
                 value={atributos.composicao_material}
                 onChange={(v) => toggleAttr("composicao_material")(v)}
+                maxLength={ATTRIBUTE_LIMITS.composicao_material}
                 placeholder="ex.: ABS + eletrônica"
               />
               <TextAttr
                 label="Marca"
                 value={atributos.marca}
                 onChange={(v) => toggleAttr("marca")(v)}
+                maxLength={ATTRIBUTE_LIMITS.marca}
               />
               <TextAttr
                 label="Modelo"
                 value={atributos.modelo}
                 onChange={(v) => toggleAttr("modelo")(v)}
+                maxLength={ATTRIBUTE_LIMITS.modelo}
               />
               <TextAttr
                 label="Fabricante"
                 value={atributos.fabricante}
                 onChange={(v) => toggleAttr("fabricante")(v)}
+                maxLength={ATTRIBUTE_LIMITS.fabricante}
               />
               <TextAttr
                 label="País de origem"
                 value={atributos.pais_origem}
                 onChange={(v) => toggleAttr("pais_origem")(v)}
+                maxLength={ATTRIBUTE_LIMITS.pais_origem}
               />
               <div className="md:col-span-2 grid grid-cols-2 md:grid-cols-3 gap-2 pt-1">
                 <BoolAttr
@@ -833,19 +878,31 @@ function TextAttr({
   label,
   value,
   onChange,
+  maxLength,
   placeholder,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
+  maxLength?: number;
   placeholder?: string;
 }) {
+  const shouldShowCount = Boolean(maxLength && value.length > maxLength * 0.8);
+
   return (
     <label className="block">
-      <div className="text-xs text-muted-foreground mb-1">{label}</div>
+      <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground mb-1">
+        <span>{label}</span>
+        {shouldShowCount && (
+          <span>
+            {value.length}/{maxLength}
+          </span>
+        )}
+      </div>
       <input
         value={value}
         onChange={(e) => onChange(e.target.value)}
+        maxLength={maxLength}
         placeholder={placeholder}
         className="w-full h-9 px-3 rounded-md border border-input bg-background text-sm focus:outline-none focus:ring-2 focus:ring-ring"
       />

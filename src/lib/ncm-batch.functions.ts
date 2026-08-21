@@ -3,6 +3,11 @@ import { z } from "zod";
 import { GoogleGenAI, Type } from "@google/genai";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import {
+  createManusFallbackError,
+  isRecoverableGeminiError,
+  runManusStructuredOutput,
+} from "@/lib/manus-ai";
 
 const MAX_DESCRICAO_IA = 1800;
 const MAX_CONTEXTO_IA = 2000;
@@ -204,6 +209,106 @@ const pdfOcrResponseSchema = {
   required: ["itens"],
 };
 
+const manusBatchResponseSchema = {
+  type: "object",
+  properties: {
+    resultados: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          descricao_original: { type: "string" },
+          natureza_funcional: { type: "string" },
+          nivel_dados: {
+            type: "string",
+            enum: ["insuficiente", "basico", "razoavel", "completo"],
+          },
+          confianca_maxima_permitida: {
+            type: "string",
+            enum: ["baixa", "media", "alta", "muito_alta"],
+          },
+          ncm_informado: { type: "string" },
+          ncm_sugerido: { type: "string" },
+          descricao_ncm: { type: "string" },
+          capitulo: { type: "string" },
+          confianca: {
+            type: "string",
+            enum: ["muito_alta", "alta", "media", "baixa"],
+          },
+          nivel_risco: { type: "string", enum: ["baixo", "medio", "alto"] },
+          divergencia: { type: "boolean" },
+          ii: { type: "string" },
+          ipi: { type: "string" },
+          pis_cofins: { type: "string" },
+          tratamento_administrativo: { type: "string" },
+          observacao: { type: "string" },
+          analise_rgi: { type: "string" },
+          justificativa: { type: "string" },
+          justificativa_auditavel: { type: "string" },
+          descricao_li: { type: "string" },
+          descricao_duimp: { type: "string" },
+          perguntas_obrigatorias: { type: "array", items: { type: "string" } },
+          falsos_cognatos_alertados: {
+            type: "array",
+            items: { type: "string" },
+          },
+          alertas: { type: "array", items: { type: "string" } },
+        },
+        required: [
+          "descricao_original",
+          "natureza_funcional",
+          "nivel_dados",
+          "confianca_maxima_permitida",
+          "ncm_informado",
+          "ncm_sugerido",
+          "descricao_ncm",
+          "capitulo",
+          "confianca",
+          "nivel_risco",
+          "divergencia",
+          "ii",
+          "ipi",
+          "pis_cofins",
+          "tratamento_administrativo",
+          "observacao",
+          "analise_rgi",
+          "justificativa",
+          "justificativa_auditavel",
+          "descricao_li",
+          "descricao_duimp",
+          "perguntas_obrigatorias",
+          "falsos_cognatos_alertados",
+          "alertas",
+        ],
+        additionalProperties: false,
+      },
+    },
+    resumo: { type: "string" },
+  },
+  required: ["resultados", "resumo"],
+  additionalProperties: false,
+};
+
+const manusPdfOcrResponseSchema = {
+  type: "object",
+  properties: {
+    itens: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          descricao: { type: "string" },
+          ncm_informado: { type: "string" },
+        },
+        required: ["descricao", "ncm_informado"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["itens"],
+  additionalProperties: false,
+};
+
 function getGeminiClient(timeout = 90_000) {
   const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
   if (!GEMINI_API_KEY) {
@@ -390,6 +495,33 @@ REGRAS:
 
       return ExtractedPdfItemsSchema.parse(JSON.parse(responseText));
     } catch (error: any) {
+      if (isRecoverableGeminiError(error)) {
+        try {
+          const imageList = data.images
+            .map(
+              (image, index) =>
+                `Imagem ${index + 1}: pagina ${image.page}, tipo "${image.kind}", arquivo anexo manus-ocr-${index + 1}.${image.mimeType === "image/png" ? "png" : "jpg"}.`,
+            )
+            .join("\n");
+
+          const manusResult = await runManusStructuredOutput<unknown>({
+            title: "Fallback OCR NCM PDF",
+            prompt: `${systemPrompt}\n\nExtraia os itens das imagens anexadas. Modo: ${data.mode}.\n\nIMAGENS:\n${imageList}\n\nRetorne apenas os campos solicitados no schema estruturado.`,
+            schema: manusPdfOcrResponseSchema,
+            attachments: data.images.map((image, index) => ({
+              name: `manus-ocr-${index + 1}.${image.mimeType === "image/png" ? "png" : "jpg"}`,
+              mimeType: image.mimeType,
+              data: image.data,
+            })),
+            timeoutMs: 180_000,
+          });
+
+          return ExtractedPdfItemsSchema.parse(manusResult);
+        } catch (manusError) {
+          throw createManusFallbackError(error, manusError);
+        }
+      }
+
       handleGeminiError(error, "extração OCR do PDF");
     }
   });
@@ -459,6 +591,22 @@ REGRAS:
       const parsed = ResultSchema.parse(JSON.parse(responseText));
       return await applyOfficialTributos(parsed);
     } catch (error: any) {
+      if (isRecoverableGeminiError(error)) {
+        try {
+          const manusResult = await runManusStructuredOutput<unknown>({
+            title: "Fallback classificacao NCM em lote",
+            prompt: `${systemPrompt}\n\n${userPrompt}\n\nResponda em portugues do Brasil e produza exatamente os campos solicitados no schema estruturado. Mantenha exatamente um resultado por item de entrada, na mesma ordem.`,
+            schema: manusBatchResponseSchema,
+            timeoutMs: 180_000,
+          });
+          const parsed = ResultSchema.parse(manusResult);
+
+          return await applyOfficialTributos(parsed);
+        } catch (manusError) {
+          throw createManusFallbackError(error, manusError);
+        }
+      }
+
       // Mensagem reconhecida pelo client (BatchClassifier.runAll) pra
       // decidir se tenta o lote de novo automaticamente.
       handleGeminiError(error);

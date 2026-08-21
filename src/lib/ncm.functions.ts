@@ -4,6 +4,11 @@ import { z } from "zod";
 import { GoogleGenAI, Type, type Part } from "@google/genai";
 import { createClient } from "@supabase/supabase-js";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import {
+  createManusFallbackError,
+  isRecoverableGeminiError,
+  runManusStructuredOutput,
+} from "@/lib/manus-ai";
 // Se o pacote acima expor de forma diferente na sua árvore, a convenção padrão do SDK atual é:
 // import { GoogleGenAI } from "@google/genai";
 import ws from "ws";
@@ -291,6 +296,126 @@ const geminiResponseSchema = {
   ],
 };
 
+const manusResponseSchema = {
+  type: "object",
+  properties: {
+    natureza_funcional: { type: "string" },
+    nivel_dados: {
+      type: "string",
+      enum: ["insuficiente", "basico", "razoavel", "completo"],
+    },
+    confianca_maxima_permitida: {
+      type: "string",
+      enum: ["baixa", "media", "alta", "muito_alta"],
+    },
+    perguntas_obrigatorias: { type: "array", items: { type: "string" } },
+    falsos_cognatos_alertados: {
+      type: "array",
+      items: { type: "string" },
+    },
+    analise_rgi: { type: "string" },
+    classifications: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          ncm: { type: "string" },
+          descricao: { type: "string" },
+          capitulo: { type: "string" },
+          confianca: {
+            type: "string",
+            enum: ["muito_alta", "alta", "media", "baixa"],
+          },
+          nivel_risco: { type: "string", enum: ["baixo", "medio", "alto"] },
+          justificativa: { type: "string" },
+          justificativa_auditavel: { type: "string" },
+          ii_aliquota: { type: "string" },
+          ipi_aliquota: { type: "string" },
+          pis_cofins: { type: "string" },
+          tratamento_administrativo: { type: "string" },
+          observacoes: { type: "string" },
+          descricao_li: { type: "string" },
+          descricao_duimp: { type: "string" },
+        },
+        required: [
+          "ncm",
+          "descricao",
+          "capitulo",
+          "confianca",
+          "nivel_risco",
+          "justificativa",
+          "justificativa_auditavel",
+          "ii_aliquota",
+          "ipi_aliquota",
+          "pis_cofins",
+          "tratamento_administrativo",
+          "observacoes",
+          "descricao_li",
+          "descricao_duimp",
+        ],
+        additionalProperties: false,
+      },
+    },
+    sugestoes_pesquisa: { type: "array", items: { type: "string" } },
+    alertas: { type: "array", items: { type: "string" } },
+  },
+  required: [
+    "natureza_funcional",
+    "nivel_dados",
+    "confianca_maxima_permitida",
+    "perguntas_obrigatorias",
+    "falsos_cognatos_alertados",
+    "analise_rgi",
+    "classifications",
+    "sugestoes_pesquisa",
+    "alertas",
+  ],
+  additionalProperties: false,
+};
+
+async function saveNcmClassification(data: NcmInput, parsed: NcmResult) {
+  const { data: searchRow, error: searchError } = await supabase
+    .from("ncm_searches")
+    .insert({
+      query: data.query,
+      operation: data.operation,
+      natureza: data.natureza,
+      atributos: {
+        ...(data.atributos ?? {}),
+        anexos: data.anexos.map((anexo) => ({
+          name: anexo.name,
+          mimeType: anexo.mimeType,
+        })),
+      },
+    })
+    .select("id")
+    .single();
+
+  if (searchError) {
+    console.error("Erro ao salvar pesquisa:", searchError);
+    return;
+  }
+
+  if (!searchRow?.id) return;
+
+  const { error: resultError } = await supabase.from("ncm_results").insert({
+    search_id: searchRow.id,
+    natureza_funcional: parsed.natureza_funcional,
+    nivel_dados: parsed.nivel_dados,
+    confianca_maxima_permitida: parsed.confianca_maxima_permitida,
+    analise_rgi: parsed.analise_rgi,
+    perguntas_obrigatorias: parsed.perguntas_obrigatorias,
+    falsos_cognatos_alertados: parsed.falsos_cognatos_alertados,
+    sugestoes_pesquisa: parsed.sugestoes_pesquisa,
+    alertas: parsed.alertas,
+    classifications: parsed.classifications,
+  });
+
+  if (resultError) {
+    console.error("Erro ao salvar resultado:", resultError);
+  }
+}
+
 export const classifyNcm = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => {
@@ -520,6 +645,24 @@ Gere sempre a estrutura de chaves acima para cada item de classificação. Nunca
       // --- FIM DO SAVE ---
       return parsed;
     } catch (error: any) {
+      if (isRecoverableGeminiError(error)) {
+        try {
+          const manusResult = await runManusStructuredOutput<unknown>({
+            title: "Fallback classificacao NCM",
+            prompt: `${systemPrompt}\n\n${userPrompt}\n\nResponda em portugues do Brasil. Use os anexos, quando houver, apenas como evidencia tecnica do produto. Produza exatamente os campos solicitados no schema estruturado.`,
+            schema: manusResponseSchema,
+            attachments: data.anexos,
+            timeoutMs: 180_000,
+          });
+          const parsed = ResultSchema.parse(manusResult);
+
+          await saveNcmClassification(data, parsed);
+          return parsed;
+        } catch (manusError) {
+          throw createManusFallbackError(error, manusError);
+        }
+      }
+
       if (error?.status === 429) {
         throw new Error(
           "Limite de requisições atingido na API do Gemini. Aguarde um momento.",

@@ -2,6 +2,11 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import {
+  createManusFallbackError,
+  isRecoverableGeminiError,
+  runManusStructuredOutput,
+} from "@/lib/manus-ai";
 
 // Sugestão rápida de NCM a partir só do nome do produto, para o botão
 // "Buscar NCM" da tela de Simulação de Custos. Depois de setar o NCM
@@ -26,9 +31,26 @@ const geminiResponseSchema = {
   properties: {
     ncm: { type: Type.STRING },
     descricao: { type: Type.STRING },
-    confianca: { type: Type.STRING, enum: ["muito_alta", "alta", "media", "baixa"] },
+    confianca: {
+      type: Type.STRING,
+      enum: ["muito_alta", "alta", "media", "baixa"],
+    },
   },
   required: ["ncm", "descricao", "confianca"],
+};
+
+const manusResponseSchema = {
+  type: "object",
+  properties: {
+    ncm: { type: "string" },
+    descricao: { type: "string" },
+    confianca: {
+      type: "string",
+      enum: ["muito_alta", "alta", "media", "baixa"],
+    },
+  },
+  required: ["ncm", "descricao", "confianca"],
+  additionalProperties: false,
 };
 
 export const suggestNcmByProductName = createServerFn({ method: "POST" })
@@ -72,12 +94,33 @@ export const suggestNcmByProductName = createServerFn({ method: "POST" })
 
       return ResultSchema.parse(JSON.parse(responseText));
     } catch (error: any) {
+      if (isRecoverableGeminiError(error)) {
+        try {
+          const manusResult = await runManusStructuredOutput<unknown>({
+            title: "Fallback NCM por nome",
+            prompt: `${systemPrompt}\n\n${userPrompt}\n\nResponda em portugues do Brasil e produza exatamente os campos solicitados no schema estruturado.`,
+            schema: manusResponseSchema,
+            timeoutMs: 90_000,
+          });
+
+          return ResultSchema.parse(manusResult);
+        } catch (manusError) {
+          throw createManusFallbackError(error, manusError);
+        }
+      }
+
       if (error?.status === 429) {
-        throw new Error("Limite de requisições atingido na API do Gemini. Aguarde um momento.");
+        throw new Error(
+          "Limite de requisições atingido na API do Gemini. Aguarde um momento.",
+        );
       }
       if (error?.status === 503) {
-        throw new Error("O serviço de IA está sobrecarregado no momento. Tente novamente em instantes.");
+        throw new Error(
+          "O serviço de IA está sobrecarregado no momento. Tente novamente em instantes.",
+        );
       }
-      throw new Error(`Não foi possível sugerir o NCM: ${error.message || error}`);
+      throw new Error(
+        `Não foi possível sugerir o NCM: ${error.message || error}`,
+      );
     }
   });

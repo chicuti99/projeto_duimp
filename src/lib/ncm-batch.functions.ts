@@ -60,6 +60,8 @@ const PdfOcrInputSchema = z.object({
 });
 
 const ResultItemSchema = z.object({
+  classificavel: z.boolean(),
+  motivo_nao_classificacao: z.string(),
   descricao_original: z.string(),
   natureza_funcional: z.string(),
   nivel_dados: z.enum(["insuficiente", "basico", "razoavel", "completo"]),
@@ -95,6 +97,18 @@ const ResultSchema = z.object({
   resumo: z.string(),
 });
 
+const SaveBatchInputSchema = z.object({
+  resultados: z.array(ResultItemSchema).min(1),
+  operacao: z.enum(["importacao", "exportacao", "ambos"]).default("importacao"),
+  contexto: z
+    .string()
+    .transform(normalizarContexto)
+    .pipe(z.string().max(MAX_CONTEXTO_IA))
+    .optional()
+    .default(""),
+  total_itens_lote: z.number().int().min(1).optional(),
+});
+
 const ExtractedPdfItemsSchema = z.object({
   itens: z.array(ItemSchema),
 });
@@ -119,6 +133,8 @@ const geminiResponseSchema = {
       items: {
         type: Type.OBJECT,
         properties: {
+          classificavel: { type: Type.BOOLEAN },
+          motivo_nao_classificacao: { type: Type.STRING },
           descricao_original: { type: Type.STRING },
           natureza_funcional: { type: Type.STRING },
           nivel_dados: {
@@ -160,6 +176,8 @@ const geminiResponseSchema = {
           alertas: { type: Type.ARRAY, items: { type: Type.STRING } },
         },
         required: [
+          "classificavel",
+          "motivo_nao_classificacao",
           "descricao_original",
           "natureza_funcional",
           "nivel_dados",
@@ -217,6 +235,8 @@ const manusBatchResponseSchema = {
       items: {
         type: "object",
         properties: {
+          classificavel: { type: "boolean" },
+          motivo_nao_classificacao: { type: "string" },
           descricao_original: { type: "string" },
           natureza_funcional: { type: "string" },
           nivel_dados: {
@@ -255,6 +275,8 @@ const manusBatchResponseSchema = {
           alertas: { type: "array", items: { type: "string" } },
         },
         required: [
+          "classificavel",
+          "motivo_nao_classificacao",
           "descricao_original",
           "natureza_funcional",
           "nivel_dados",
@@ -374,6 +396,94 @@ function appendObservation(observacao: string, addition: string) {
   return trimmed ? `${trimmed} ${addition}` : addition;
 }
 
+function batchItemToClassification(result: NcmBatchItem) {
+  return {
+    ncm: result.ncm_sugerido,
+    descricao: result.descricao_ncm,
+    capitulo: result.capitulo,
+    confianca: result.confianca,
+    nivel_risco: result.nivel_risco,
+    justificativa: result.justificativa,
+    justificativa_auditavel: result.justificativa_auditavel,
+    ii_aliquota: result.ii,
+    ipi_aliquota: result.ipi,
+    pis_cofins: result.pis_cofins,
+    tratamento_administrativo: result.tratamento_administrativo,
+    observacoes: result.observacao,
+    descricao_li: result.descricao_li,
+    descricao_duimp: result.descricao_duimp,
+  };
+}
+
+async function saveBatchNcmClassifications(
+  data: z.infer<typeof SaveBatchInputSchema>,
+) {
+  const classificaveis = data.resultados
+    .map((result, index) => ({ result, index }))
+    .filter(({ result }) => result.classificavel);
+  if (!classificaveis.length) {
+    return { saved: 0, ignored: data.resultados.length, failed: 0 };
+  }
+
+  let saved = 0;
+  let failed = 0;
+
+  for (const { result, index } of classificaveis) {
+    const { data: searchRow, error: searchError } = await supabaseAdmin
+      .from("ncm_searches")
+      .insert({
+        query: result.descricao_original,
+        operation: data.operacao,
+        natureza: "nao_sei",
+        atributos: {
+          origem: "classificacao_em_lote",
+          contexto: data.contexto,
+          total_itens_lote: data.total_itens_lote ?? data.resultados.length,
+          indice_item_lote: index + 1,
+          ncm_informado: result.ncm_informado,
+        },
+      })
+      .select("id")
+      .single();
+
+    if (searchError) {
+      console.error("Erro ao salvar pesquisa em lote:", searchError);
+      failed += 1;
+      continue;
+    }
+
+    if (!searchRow?.id) continue;
+
+    const { error: resultError } = await supabaseAdmin
+      .from("ncm_results")
+      .insert({
+        search_id: searchRow.id,
+        natureza_funcional: result.natureza_funcional,
+        nivel_dados: result.nivel_dados,
+        confianca_maxima_permitida: result.confianca_maxima_permitida,
+        analise_rgi: result.analise_rgi,
+        perguntas_obrigatorias: result.perguntas_obrigatorias,
+        falsos_cognatos_alertados: result.falsos_cognatos_alertados,
+        sugestoes_pesquisa: [],
+        alertas: result.alertas,
+        classifications: [batchItemToClassification(result)],
+      });
+
+    if (resultError) {
+      console.error("Erro ao salvar resultado em lote:", resultError);
+      failed += 1;
+    } else {
+      saved += 1;
+    }
+  }
+
+  return {
+    saved,
+    ignored: data.resultados.length - classificaveis.length,
+    failed,
+  };
+}
+
 async function applyOfficialTributos(
   parsed: NcmBatchResult,
 ): Promise<NcmBatchResult> {
@@ -406,6 +516,15 @@ async function applyOfficialTributos(
   return {
     ...parsed,
     resultados: parsed.resultados.map((result) => {
+      if (!result.classificavel) {
+        return {
+          ...result,
+          ii: "n/a",
+          ipi: "n/a",
+          pis_cofins: "n/a",
+        };
+      }
+
       const ncm = normalizeNcm(result.ncm_sugerido);
       const tributo = tributosByNcm.get(ncm);
 
@@ -536,7 +655,7 @@ export const classifyNcmBatch = createServerFn({ method: "POST" })
 
     const systemPrompt = `Você é auditor-fiscal especialista em classificação de mercadorias (NCM/SH/TEC Mercosul), Siscomex (DUIMP, Catálogo de Produtos, LI/LPCO), órgãos anuentes (RFB, Anvisa, Inmetro, MAPA, Anatel, Decex, Exército, IBAMA, ANP) e RGI/NESH.
 
-Receberá uma LISTA de itens extraídos de planilha, invoice, proforma, packing list, cotação ou texto colado. Para cada item, retorne um resultado completo no mesmo padrão da classificação individual:
+Receberá uma LISTA de candidatos extraídos de planilha, invoice, proforma, packing list, cotação ou texto colado. Para cada entrada, retorne um resultado completo no mesmo padrão da classificação individual:
 1. Identifique natureza_funcional, setor SH, capítulo, NCM provável e descrição oficial.
 2. Aplique RGI 1/3/6 explicitamente em analise_rgi e justificativa_auditavel.
 3. Se o usuário informou um NCM, compare. Marque divergencia=true quando os 8 dígitos diferirem.
@@ -546,12 +665,16 @@ Receberá uma LISTA de itens extraídos de planilha, invoice, proforma, packing 
 7. Mantenha descricao_original exatamente como recebida.
 
 REGRAS:
+- Antes de classificar, valide se a entrada descreve uma mercadoria/produto físico, peça, insumo, componente, equipamento, material, preparação, embalagem com produto, ou kit comercial classificável na NCM.
+- Se a entrada NÃO for produto classificável (ex.: vendedor, comprador, endereço, telefone, e-mail, CNPJ/VAT, banco, beneficiário, conta, swift, pagamento, frete isolado, total, subtotal, data, invoice/order number, assinatura, observação geral, incoterm, lead time, validade), retorne classificavel=false, explique em motivo_nao_classificacao, mantenha descricao_original exatamente como recebida e NÃO invente NCM.
+- Para classificavel=false use ncm_sugerido="n/a", descricao_ncm="Não é mercadoria classificável", capitulo="n/a", confianca="baixa", nivel_risco="alto", divergencia=false, II/IPI/PIS_COFINS="n/a", tratamento_administrativo="Não aplicável", analise_rgi="Não aplicável: a entrada não descreve uma mercadoria.", justificativa e justificativa_auditavel explicando a rejeição, descricao_li/descricao_duimp vazias, perguntas_obrigatorias vazias, falsos_cognatos_alertados vazios e alertas contendo "Entrada ignorada por não ser produto classificável".
+- Para produtos classificáveis, retorne classificavel=true e motivo_nao_classificacao="".
 - Se a descrição for vaga, escolha a NCM mais provável mas use confianca="baixa" e explique na observação.
 - Respeite o teto de confiança: descrição curta/nome comercial não passa de "media"; com ficha técnica/atributos pode chegar a "alta"; manual/catálogo/composição completa pode chegar a "muito_alta".
 - Defina nivel_dados como "insuficiente", "basico", "razoavel" ou "completo" exatamente nesses valores sem acento.
 - Popule perguntas_obrigatorias quando faltarem dados críticos antes de operar com o NCM.
 - Alerte falsos cognatos fiscais quando aplicável: "respiratório" ≠ terapêutico; "eletrônico" nem sempre cap. 85; "sensor" pode ser cap. 90; "industrial" nem sempre é máquina.
-- Use formato exato XXXX.XX.XX nos NCMs.
+- Use formato exato XXXX.XX.XX nos NCMs dos produtos classificáveis. Use "n/a" apenas quando classificavel=false.
 - Retorne EXATAMENTE um resultado por item de entrada, na mesma ordem.
 - Responda estritamente no JSON solicitado.`;
 
@@ -588,8 +711,9 @@ REGRAS:
         throw new Error("Resposta da IA retornou vazia.");
       }
 
-      const parsed = ResultSchema.parse(JSON.parse(responseText));
-      return await applyOfficialTributos(parsed);
+      return await applyOfficialTributos(
+        ResultSchema.parse(JSON.parse(responseText)),
+      );
     } catch (error: any) {
       if (isRecoverableGeminiError(error)) {
         try {
@@ -599,9 +723,7 @@ REGRAS:
             schema: manusBatchResponseSchema,
             timeoutMs: 180_000,
           });
-          const parsed = ResultSchema.parse(manusResult);
-
-          return await applyOfficialTributos(parsed);
+          return await applyOfficialTributos(ResultSchema.parse(manusResult));
         } catch (manusError) {
           throw createManusFallbackError(error, manusError);
         }
@@ -612,3 +734,8 @@ REGRAS:
       handleGeminiError(error);
     }
   });
+
+export const saveNcmBatchResults = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: unknown) => SaveBatchInputSchema.parse(input))
+  .handler(async ({ data }) => saveBatchNcmClassifications(data));

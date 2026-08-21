@@ -10,16 +10,23 @@ import {
   AlertTriangle,
   CheckCircle2,
   Trash2,
+  Pencil,
+  Save,
+  X,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import {
   classifyNcmBatch,
   extractNcmRowsFromPdfImages,
+  saveNcmBatchResults,
   type NcmBatchItem,
 } from "@/lib/ncm-batch.functions";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Select,
@@ -825,7 +832,21 @@ function isPdfNoiseLine(line: string) {
   const normalized = normalizeHeader(line);
   if (!normalized) return true;
   if (
-    ["item", "description", "descricao", "ncm", "hscode"].includes(normalized)
+    [
+      "item",
+      "description",
+      "descricao",
+      "ncm",
+      "hscode",
+      "from",
+      "to",
+      "date",
+      "invoiceno",
+      "orderno",
+      "shipping",
+      "total",
+      "paymentto",
+    ].includes(normalized)
   )
     return true;
 
@@ -848,6 +869,14 @@ function isPdfNoiseLine(line: string) {
     "countryoforigin",
     "incoterms",
     "paymentconditions",
+    "priceterm",
+    "payment",
+    "beneficiary",
+    "bank",
+    "swift",
+    "accountno",
+    "leadtime",
+    "validity",
     "thankyou",
     "eoe",
   ].some((hint) => normalized.includes(hint));
@@ -887,7 +916,9 @@ function findNcmInLine(line: string) {
 
 function stripTableRowPrefix(value: string) {
   return value
-    .replace(/^\s*(?:item|it\.?|no\.?|n[ºo])?\s*\d{1,6}\s*[-.)|:]?\s+/i, "")
+    .replace(/^\s*(?:item|it\.?|n[ºo])\s*\d{1,6}\s*[-.)|:]\s+/i, "")
+    .replace(/^\s*\d{1,6}\s*[-.)|:]\s+/i, "")
+    .replace(/^\s*\d{1,6}\s+/i, "")
     .replace(
       /^\s*(?:description|descricao|product|produto|mercadoria)\s*[:|-]?\s*/i,
       "",
@@ -909,6 +940,109 @@ function dedupeRows(input: InputRow[]) {
   }
 
   return rows;
+}
+
+function isInvoiceProductTableHeader(line: string) {
+  const normalized = normalizeHeader(line);
+  const hasProductHeader = [
+    "product",
+    "nameoftheproduct",
+    "description",
+    "descricao",
+    "mercadoria",
+    "goods",
+  ].some((hint) => normalized.includes(hint));
+  const hasCommercialColumn = [
+    "amount",
+    "total",
+    "qty",
+    "quantity",
+    "unit",
+    "price",
+    "usd",
+  ].some((hint) => normalized.includes(hint));
+
+  return hasProductHeader && hasCommercialColumn;
+}
+
+function isInvoiceProductTableTerminator(line: string) {
+  const normalized = normalizeHeader(line);
+  if (
+    [
+      "total",
+      "subtotal",
+      "paymentto",
+      "remark",
+      "remarks",
+      "note",
+      "notes",
+    ].includes(normalized)
+  )
+    return true;
+
+  return [
+    "shippingfee",
+    "freight",
+    "insurance",
+    "paymentto",
+    "priceterm",
+    "payment",
+    "beneficiary",
+    "bank",
+    "swift",
+    "accountno",
+    "leadtime",
+    "validity",
+  ].some((hint) => normalized.includes(hint));
+}
+
+function splitInvoiceAmountRow(line: string) {
+  const numericValue = String.raw`(?:\d{1,3}(?:[.,]\d{3})+|\d+)(?:[.,]\d+)?`;
+  const match = line.match(
+    new RegExp(
+      String.raw`^(?<descricao>.+?)\s+(?<values>${numericValue}(?:\s+${numericValue}){1,5})$`,
+      "i",
+    ),
+  );
+  const descricao = stripTableRowPrefix(match?.groups?.descricao ?? "");
+  if (!isProductLikeDescription(descricao)) return null;
+
+  return descricao;
+}
+
+function extractInvoiceAmountRows(lines: string[]) {
+  const headerIndex = lines.findIndex(isInvoiceProductTableHeader);
+  if (headerIndex < 0) return [];
+
+  const rows: InputRow[] = [];
+  let pendingDescription = "";
+
+  for (const line of lines.slice(headerIndex + 1)) {
+    if (isInvoiceProductTableHeader(line)) continue;
+    if (isInvoiceProductTableTerminator(line)) break;
+    if (isPdfNoiseLine(line)) continue;
+
+    const descricao = splitInvoiceAmountRow(line);
+    if (descricao) {
+      rows.push({
+        descricao: pendingDescription
+          ? `${pendingDescription} ${descricao}`.trim()
+          : descricao,
+        ncm_informado: findNcmInLine(line)?.ncm ?? "",
+      });
+      pendingDescription = "";
+      continue;
+    }
+
+    const continuation = stripTableRowPrefix(line);
+    if (isProductLikeDescription(continuation)) {
+      pendingDescription = pendingDescription
+        ? `${pendingDescription} ${continuation}`.trim()
+        : continuation;
+    }
+  }
+
+  return normalizeRows(rows);
 }
 
 function extractInlineTableRows(lines: string[]) {
@@ -1016,6 +1150,9 @@ function textToRows(text: string): InputRow[] {
   const stackedRows = extractStackedColumnRows(lines);
   if (stackedRows.length) return dedupeRows(stackedRows);
 
+  const invoiceAmountRows = extractInvoiceAmountRows(lines);
+  if (invoiceAmountRows.length) return dedupeRows(invoiceAmountRows);
+
   return dedupeRows(
     normalizeRows(
       lines.filter(isProductLikeDescription).map((line) => ({
@@ -1050,6 +1187,12 @@ export function BatchClassifier() {
   const fileRef = useRef<HTMLInputElement>(null);
   const runFn = useServerFn(classifyNcmBatch);
   const extractPdfFn = useServerFn(extractNcmRowsFromPdfImages);
+  const saveBatchFn = useServerFn(saveNcmBatchResults);
+  const [resultPage, setResultPage] = useState(1);
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState<NcmBatchItem | null>(null);
+  const [isSavingHistory, setIsSavingHistory] = useState(false);
+  const [historySaved, setHistorySaved] = useState(false);
 
   async function extractPdfImagesWithRetries(
     images: PdfOcrImage[],
@@ -1083,6 +1226,14 @@ export function BatchClassifier() {
     setNcmKey(NONE_COLUMN);
   }
 
+  function resetBatchResults() {
+    setResults(null);
+    setResultPage(1);
+    setEditingIndex(null);
+    setEditDraft(null);
+    setHistorySaved(false);
+  }
+
   // Chamado tanto pelo palpite inicial (handleFile) quanto pelos <Select>
   // de mapeamento, quando o usuário troca a coluna detectada.
   function applyColumnMapping(
@@ -1093,7 +1244,7 @@ export function BatchClassifier() {
     setDescKey(nextDescKey);
     setNcmKey(nextNcmKey);
     setRows(normalizeRows(mapRawRows(sourceRows, nextDescKey, nextNcmKey)));
-    setResults(null);
+    resetBatchResults();
   }
 
   async function handleFile(file: File) {
@@ -1118,7 +1269,7 @@ export function BatchClassifier() {
         setDescKey(parsed.descKey);
         setNcmKey(parsed.ncmKey);
         setRows(parsed.rows);
-        setResults(null);
+        resetBatchResults();
         toast.success(
           `${parsed.rows.length} itens lidos de ${parsed.includedSheets.length} aba(s)`,
           {
@@ -1205,7 +1356,7 @@ export function BatchClassifier() {
         }
         resetColumnMapping();
         setRows(parsed);
-        setResults(null);
+        resetBatchResults();
         toast.success(
           `${parsed.length} itens lidos do arquivo${usedOcr ? " via OCR" : ""}`,
         );
@@ -1224,7 +1375,7 @@ export function BatchClassifier() {
     if (!parsed.length) return toast.error("Nada para importar");
     resetColumnMapping();
     setRows(parsed);
-    setResults(null);
+    resetBatchResults();
     toast.success(`${parsed.length} itens carregados`);
   }
 
@@ -1233,6 +1384,10 @@ export function BatchClassifier() {
 
     const lotes = chunk(normalizeRows(rows), MAX_BATCH);
     setResults([]);
+    setResultPage(1);
+    setEditingIndex(null);
+    setEditDraft(null);
+    setHistorySaved(false);
     setIsRunning(true);
     setProgress({ loteAtual: 0, totalLotes: lotes.length, itensFeitos: 0 });
 
@@ -1262,6 +1417,7 @@ export function BatchClassifier() {
           });
           acumulado.push(...resultado.resultados);
           setResults([...acumulado]);
+          setResultPage(i + 1);
           sucesso = true;
           break;
         } catch (error) {
@@ -1290,8 +1446,9 @@ export function BatchClassifier() {
 
     setIsRunning(false);
     setProgress(null);
+    const rejeitados = acumulado.filter((item) => !item.classificavel).length;
     toast.success(
-      `${acumulado.length} itens classificados${lotes.length > 1 ? ` em ${lotes.length} lotes` : ""}`,
+      `${acumulado.length - rejeitados} itens classificados${rejeitados ? `; ${rejeitados} ignorado(s)` : ""}${lotes.length > 1 ? ` em ${lotes.length} lotes` : ""}`,
     );
   }
 
@@ -1299,10 +1456,111 @@ export function BatchClassifier() {
     return items.filter(Boolean).join("\n");
   }
 
+  function listToEditableText(items: string[]) {
+    return items.join("\n");
+  }
+
+  function editableTextToList(value: string) {
+    return value
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  function updateEditDraft<K extends keyof NcmBatchItem>(
+    key: K,
+    value: NcmBatchItem[K],
+  ) {
+    setEditDraft((current) =>
+      current ? { ...current, [key]: value } : current,
+    );
+  }
+
+  function startEditingResult(index: number) {
+    const result = results?.[index];
+    if (!result) return;
+    setEditingIndex(index);
+    setEditDraft({ ...result });
+  }
+
+  function cancelEditingResult() {
+    setEditingIndex(null);
+    setEditDraft(null);
+  }
+
+  function saveEditingResult() {
+    if (editingIndex === null || !editDraft) return;
+    setResults((current) =>
+      current
+        ? current.map((item, index) =>
+            index === editingIndex ? editDraft : item,
+          )
+        : current,
+    );
+    setHistorySaved(false);
+    cancelEditingResult();
+  }
+
+  async function saveResultsToHistory() {
+    if (!results?.length || isSavingHistory) return;
+    if (editingIndex !== null) {
+      toast.error("Conclua ou cancele a edição antes de salvar.");
+      return;
+    }
+
+    setIsSavingHistory(true);
+    try {
+      const response = await saveBatchFn({
+        data: {
+          resultados: results,
+          operacao,
+          contexto,
+          total_itens_lote: results.length,
+        },
+      });
+
+      const saved = Number(response?.saved ?? 0);
+      const ignored = Number(response?.ignored ?? 0);
+      const failed = Number(response?.failed ?? 0);
+
+      if (failed > 0) {
+        toast.warning(`${saved} item(ns) salvos; ${failed} falharam.`, {
+          description:
+            ignored > 0 ? `${ignored} entrada(s) ignorada(s).` : undefined,
+        });
+        return;
+      }
+
+      if (saved === 0) {
+        toast.warning("Nenhum produto classificável para salvar.", {
+          description:
+            ignored > 0 ? `${ignored} entrada(s) ignorada(s).` : undefined,
+        });
+        return;
+      }
+
+      setHistorySaved(true);
+      toast.success(`${saved} item(ns) salvos no histórico`, {
+        description:
+          ignored > 0 ? `${ignored} entrada(s) ignorada(s).` : undefined,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Erro desconhecido";
+      toast.error("Não foi possível salvar no histórico.", {
+        description: message,
+      });
+    } finally {
+      setIsSavingHistory(false);
+    }
+  }
+
   function exportXlsx() {
     if (!results) return;
     const data = results.map((r) => ({
       Descrição: r.descricao_original,
+      "Produto classificável": r.classificavel ? "SIM" : "não",
+      "Motivo da não classificação": r.motivo_nao_classificacao,
       "Natureza funcional": r.natureza_funcional,
       "Qualidade dos dados": r.nivel_dados,
       "Teto de confiança": r.confianca_maxima_permitida,
@@ -1335,6 +1593,19 @@ export function BatchClassifier() {
       `classificacao-ncm-${new Date().toISOString().slice(0, 10)}.xlsx`,
     );
   }
+
+  const resultPageCount = Math.max(
+    1,
+    Math.ceil((results?.length ?? 0) / MAX_BATCH),
+  );
+  const currentResultPage = Math.min(Math.max(resultPage, 1), resultPageCount);
+  const resultPageStart = (currentResultPage - 1) * MAX_BATCH;
+  const visibleResults =
+    results?.slice(resultPageStart, resultPageStart + MAX_BATCH) ?? [];
+  const resultPageEnd = Math.min(
+    resultPageStart + MAX_BATCH,
+    results?.length ?? 0,
+  );
 
   return (
     <Card className="p-6 space-y-5">
@@ -1519,7 +1790,7 @@ export function BatchClassifier() {
               variant="ghost"
               onClick={() => {
                 setRows([]);
-                setResults(null);
+                resetBatchResults();
                 resetColumnMapping();
               }}
               disabled={isRunning}
@@ -1543,19 +1814,55 @@ export function BatchClassifier() {
 
       {results && (
         <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="text-sm text-muted-foreground">
-              {results.filter((r) => r.divergencia).length} divergência(s)
-              detectada(s)
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="space-y-1 text-sm text-muted-foreground">
+              <div>
+                {results.filter((r) => r.divergencia && r.classificavel).length}{" "}
+                divergência(s) detectada(s)
+                {results.some((r) => !r.classificavel)
+                  ? ` · ${results.filter((r) => !r.classificavel).length} entrada(s) ignorada(s)`
+                  : ""}
+              </div>
+              <div>
+                Lote {currentResultPage} de {resultPageCount} · itens{" "}
+                {results.length ? resultPageStart + 1 : 0}-{resultPageEnd} de{" "}
+                {results.length}
+              </div>
             </div>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={exportXlsx}
-            >
-              <Download className="h-4 w-4 mr-1" /> Exportar XLSX
-            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setResultPage((page) => Math.max(1, page - 1))}
+                disabled={currentResultPage <= 1 || editingIndex !== null}
+              >
+                <ChevronLeft className="h-4 w-4" />
+                Anterior
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() =>
+                  setResultPage((page) => Math.min(resultPageCount, page + 1))
+                }
+                disabled={
+                  currentResultPage >= resultPageCount || editingIndex !== null
+                }
+              >
+                Próximo
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={exportXlsx}
+              >
+                <Download className="h-4 w-4 mr-1" /> Exportar XLSX
+              </Button>
+            </div>
           </div>
           <div className="overflow-x-auto border rounded-md">
             <table className="w-full text-xs">
@@ -1570,112 +1877,465 @@ export function BatchClassifier() {
                   <th className="p-2">PIS/COFINS</th>
                   <th className="p-2">Anuência</th>
                   <th className="p-2">Obs.</th>
+                  <th className="p-2">Ações</th>
                 </tr>
               </thead>
               <tbody>
-                {results.map((r, i) => (
-                  <Fragment key={i}>
-                    <tr
-                      className={`border-t ${r.divergencia ? "bg-destructive/5" : ""}`}
-                    >
-                      <td className="p-2 max-w-[220px]">
-                        {r.descricao_original}
-                      </td>
-                      <td className="p-2 font-mono">
-                        {r.ncm_informado || "—"}
-                      </td>
-                      <td className="p-2 font-mono font-semibold">
-                        {r.ncm_sugerido}
-                        {r.divergencia ? (
-                          <Badge
-                            variant="destructive"
-                            className="ml-1 text-[10px]"
-                          >
-                            <AlertTriangle className="h-3 w-3 mr-0.5" /> diverge
-                          </Badge>
-                        ) : r.ncm_informado ? (
-                          <Badge
-                            variant="secondary"
-                            className="ml-1 text-[10px]"
-                          >
-                            <CheckCircle2 className="h-3 w-3 mr-0.5" /> ok
-                          </Badge>
-                        ) : null}
-                        <div className="mt-1 text-[10px] font-normal text-muted-foreground">
-                          {r.capitulo}
-                        </div>
-                      </td>
-                      <td className="p-2">
-                        <div>{r.confianca}</div>
-                        <div className="text-[10px] text-muted-foreground">
-                          dados: {r.nivel_dados}
-                        </div>
-                      </td>
-                      <td className="p-2">{r.ii}</td>
-                      <td className="p-2">{r.ipi}</td>
-                      <td className="p-2">{r.pis_cofins}</td>
-                      <td className="p-2 max-w-[160px]">
-                        {r.tratamento_administrativo}
-                      </td>
-                      <td className="p-2 max-w-[220px] text-muted-foreground">
-                        {r.observacao}
-                      </td>
-                    </tr>
-                    <tr className="border-t bg-muted/10">
-                      <td colSpan={9} className="p-3">
-                        <div className="grid gap-3 md:grid-cols-2">
-                          <BatchDetailBlock
-                            title="Descrição sugerida — LI"
-                            text={r.descricao_li}
-                          />
-                          <BatchDetailBlock
-                            title="Descrição sugerida — DUIMP / Catálogo"
-                            text={r.descricao_duimp}
-                          />
-                          <BatchDetailBlock
-                            title="Justificativa"
-                            text={r.justificativa}
-                          />
-                          <BatchDetailBlock
-                            title="Justificativa auditável / RGI"
-                            text={`${r.justificativa_auditavel}\n\n${r.analise_rgi}`}
-                          />
-                        </div>
-
-                        {(r.perguntas_obrigatorias.length > 0 ||
-                          r.falsos_cognatos_alertados.length > 0 ||
-                          r.alertas.length > 0) && (
-                          <div className="mt-3 grid gap-2 md:grid-cols-3">
-                            {r.perguntas_obrigatorias.length > 0 && (
-                              <BatchListBlock
-                                title="Perguntas obrigatórias"
-                                items={r.perguntas_obrigatorias}
-                              />
-                            )}
-                            {r.falsos_cognatos_alertados.length > 0 && (
-                              <BatchListBlock
-                                title="Falsos cognatos"
-                                items={r.falsos_cognatos_alertados}
-                              />
-                            )}
-                            {r.alertas.length > 0 && (
-                              <BatchListBlock
-                                title="Alertas"
-                                items={r.alertas}
-                              />
-                            )}
+                {visibleResults.map((r, localIndex) => {
+                  const i = resultPageStart + localIndex;
+                  return (
+                    <Fragment key={i}>
+                      <tr
+                        className={`border-t ${!r.classificavel ? "bg-muted/30" : r.divergencia ? "bg-destructive/5" : ""}`}
+                      >
+                        <td className="p-2 max-w-[220px]">
+                          {r.descricao_original}
+                          {!r.classificavel ? (
+                            <Badge
+                              variant="secondary"
+                              className="mt-1 text-[10px]"
+                            >
+                              não é produto
+                            </Badge>
+                          ) : null}
+                        </td>
+                        <td className="p-2 font-mono">
+                          {r.ncm_informado || "—"}
+                        </td>
+                        <td className="p-2 font-mono font-semibold">
+                          {r.ncm_sugerido}
+                          {!r.classificavel ? (
+                            <Badge
+                              variant="secondary"
+                              className="ml-1 text-[10px]"
+                            >
+                              ignorado
+                            </Badge>
+                          ) : r.divergencia ? (
+                            <Badge
+                              variant="destructive"
+                              className="ml-1 text-[10px]"
+                            >
+                              <AlertTriangle className="h-3 w-3 mr-0.5" />{" "}
+                              diverge
+                            </Badge>
+                          ) : r.ncm_informado ? (
+                            <Badge
+                              variant="secondary"
+                              className="ml-1 text-[10px]"
+                            >
+                              <CheckCircle2 className="h-3 w-3 mr-0.5" /> ok
+                            </Badge>
+                          ) : null}
+                          <div className="mt-1 text-[10px] font-normal text-muted-foreground">
+                            {r.capitulo}
                           </div>
-                        )}
-                      </td>
-                    </tr>
-                  </Fragment>
-                ))}
+                        </td>
+                        <td className="p-2">
+                          <div>{r.confianca}</div>
+                          <div className="text-[10px] text-muted-foreground">
+                            dados: {r.nivel_dados}
+                          </div>
+                        </td>
+                        <td className="p-2">{r.ii}</td>
+                        <td className="p-2">{r.ipi}</td>
+                        <td className="p-2">{r.pis_cofins}</td>
+                        <td className="p-2 max-w-[160px]">
+                          {r.tratamento_administrativo}
+                        </td>
+                        <td className="p-2 max-w-[220px] text-muted-foreground">
+                          {r.classificavel
+                            ? r.observacao
+                            : r.motivo_nao_classificacao || r.observacao}
+                        </td>
+                        <td className="p-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => startEditingResult(i)}
+                            disabled={isRunning || isSavingHistory}
+                            title="Editar resultado"
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                        </td>
+                      </tr>
+                      <tr className="border-t bg-muted/10">
+                        <td colSpan={10} className="p-3">
+                          {editingIndex === i && editDraft ? (
+                            <BatchResultEditor
+                              draft={editDraft}
+                              onChange={updateEditDraft}
+                              listToEditableText={listToEditableText}
+                              editableTextToList={editableTextToList}
+                              onCancel={cancelEditingResult}
+                              onSave={saveEditingResult}
+                            />
+                          ) : (
+                            <>
+                              <div className="grid gap-3 md:grid-cols-2">
+                                <BatchDetailBlock
+                                  title="Descrição sugerida — LI"
+                                  text={r.descricao_li}
+                                />
+                                <BatchDetailBlock
+                                  title="Descrição sugerida — DUIMP / Catálogo"
+                                  text={r.descricao_duimp}
+                                />
+                                <BatchDetailBlock
+                                  title="Justificativa"
+                                  text={r.justificativa}
+                                />
+                                <BatchDetailBlock
+                                  title="Justificativa auditável / RGI"
+                                  text={`${r.justificativa_auditavel}\n\n${r.analise_rgi}`}
+                                />
+                              </div>
+
+                              {(r.perguntas_obrigatorias.length > 0 ||
+                                r.falsos_cognatos_alertados.length > 0 ||
+                                r.alertas.length > 0) && (
+                                <div className="mt-3 grid gap-2 md:grid-cols-3">
+                                  {r.perguntas_obrigatorias.length > 0 && (
+                                    <BatchListBlock
+                                      title="Perguntas obrigatórias"
+                                      items={r.perguntas_obrigatorias}
+                                    />
+                                  )}
+                                  {r.falsos_cognatos_alertados.length > 0 && (
+                                    <BatchListBlock
+                                      title="Falsos cognatos"
+                                      items={r.falsos_cognatos_alertados}
+                                    />
+                                  )}
+                                  {r.alertas.length > 0 && (
+                                    <BatchListBlock
+                                      title="Alertas"
+                                      items={r.alertas}
+                                    />
+                                  )}
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
+          </div>
+          <div className="flex flex-col gap-3 border-t pt-3 md:flex-row md:items-center md:justify-between">
+            <div className="text-xs text-muted-foreground">
+              Revise e edite os resultados antes de salvar no histórico.
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              onClick={saveResultsToHistory}
+              disabled={
+                !results.length ||
+                isRunning ||
+                isSavingHistory ||
+                historySaved ||
+                editingIndex !== null
+              }
+            >
+              {isSavingHistory ? (
+                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+              ) : (
+                <Save className="h-4 w-4 mr-1" />
+              )}
+              {historySaved ? "Salvo no histórico" : "Salvar no histórico"}
+            </Button>
           </div>
         </div>
       )}
     </Card>
+  );
+}
+
+function BatchResultEditor({
+  draft,
+  onChange,
+  listToEditableText,
+  editableTextToList,
+  onCancel,
+  onSave,
+}: {
+  draft: NcmBatchItem;
+  onChange: <K extends keyof NcmBatchItem>(
+    key: K,
+    value: NcmBatchItem[K],
+  ) => void;
+  listToEditableText: (items: string[]) => string;
+  editableTextToList: (value: string) => string[];
+  onCancel: () => void;
+  onSave: () => void;
+}) {
+  return (
+    <div className="rounded-md border border-border/70 bg-background p-3">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="text-xs font-semibold">Editar resultado</div>
+        <div className="flex gap-2">
+          <Button type="button" size="sm" variant="outline" onClick={onCancel}>
+            <X className="h-4 w-4 mr-1" />
+            Cancelar
+          </Button>
+          <Button type="button" size="sm" onClick={onSave}>
+            <Save className="h-4 w-4 mr-1" />
+            Aplicar
+          </Button>
+        </div>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-3">
+        <EditableSelect
+          label="Produto classificável"
+          value={draft.classificavel ? "true" : "false"}
+          options={[
+            ["true", "Sim"],
+            ["false", "Não"],
+          ]}
+          onChange={(value) => onChange("classificavel", value === "true")}
+        />
+        <EditableTextField
+          label="NCM informado"
+          value={draft.ncm_informado}
+          onChange={(value) => onChange("ncm_informado", value)}
+        />
+        <EditableTextField
+          label="NCM sugerido"
+          value={draft.ncm_sugerido}
+          onChange={(value) => onChange("ncm_sugerido", value)}
+        />
+        <EditableSelect
+          label="Confiança"
+          value={draft.confianca}
+          options={[
+            ["muito_alta", "muito_alta"],
+            ["alta", "alta"],
+            ["media", "media"],
+            ["baixa", "baixa"],
+          ]}
+          onChange={(value) =>
+            onChange("confianca", value as NcmBatchItem["confianca"])
+          }
+        />
+        <EditableSelect
+          label="Qualidade dos dados"
+          value={draft.nivel_dados}
+          options={[
+            ["insuficiente", "insuficiente"],
+            ["basico", "basico"],
+            ["razoavel", "razoavel"],
+            ["completo", "completo"],
+          ]}
+          onChange={(value) =>
+            onChange("nivel_dados", value as NcmBatchItem["nivel_dados"])
+          }
+        />
+        <EditableSelect
+          label="Risco fiscal"
+          value={draft.nivel_risco}
+          options={[
+            ["baixo", "baixo"],
+            ["medio", "medio"],
+            ["alto", "alto"],
+          ]}
+          onChange={(value) =>
+            onChange("nivel_risco", value as NcmBatchItem["nivel_risco"])
+          }
+        />
+        <EditableSelect
+          label="Teto de confiança"
+          value={draft.confianca_maxima_permitida}
+          options={[
+            ["baixa", "baixa"],
+            ["media", "media"],
+            ["alta", "alta"],
+            ["muito_alta", "muito_alta"],
+          ]}
+          onChange={(value) =>
+            onChange(
+              "confianca_maxima_permitida",
+              value as NcmBatchItem["confianca_maxima_permitida"],
+            )
+          }
+        />
+        <EditableTextField
+          label="II"
+          value={draft.ii}
+          onChange={(value) => onChange("ii", value)}
+        />
+        <EditableTextField
+          label="IPI"
+          value={draft.ipi}
+          onChange={(value) => onChange("ipi", value)}
+        />
+        <EditableTextField
+          label="PIS/COFINS"
+          value={draft.pis_cofins}
+          onChange={(value) => onChange("pis_cofins", value)}
+        />
+        <EditableTextField
+          label="Capítulo"
+          value={draft.capitulo}
+          onChange={(value) => onChange("capitulo", value)}
+        />
+        <EditableTextField
+          label="Anuência"
+          value={draft.tratamento_administrativo}
+          onChange={(value) => onChange("tratamento_administrativo", value)}
+        />
+      </div>
+
+      <div className="mt-3 grid gap-3 md:grid-cols-2">
+        <EditableTextArea
+          label="Descrição original"
+          value={draft.descricao_original}
+          onChange={(value) => onChange("descricao_original", value)}
+        />
+        <EditableTextArea
+          label="Descrição NCM"
+          value={draft.descricao_ncm}
+          onChange={(value) => onChange("descricao_ncm", value)}
+        />
+        <EditableTextArea
+          label="Motivo da não classificação"
+          value={draft.motivo_nao_classificacao}
+          onChange={(value) => onChange("motivo_nao_classificacao", value)}
+        />
+        <EditableTextArea
+          label="Observação"
+          value={draft.observacao}
+          onChange={(value) => onChange("observacao", value)}
+        />
+        <EditableTextArea
+          label="Justificativa"
+          value={draft.justificativa}
+          onChange={(value) => onChange("justificativa", value)}
+        />
+        <EditableTextArea
+          label="Justificativa auditável"
+          value={draft.justificativa_auditavel}
+          onChange={(value) => onChange("justificativa_auditavel", value)}
+        />
+        <EditableTextArea
+          label="Análise RGI"
+          value={draft.analise_rgi}
+          onChange={(value) => onChange("analise_rgi", value)}
+        />
+        <EditableTextArea
+          label="Natureza funcional"
+          value={draft.natureza_funcional}
+          onChange={(value) => onChange("natureza_funcional", value)}
+        />
+        <EditableTextArea
+          label="Descrição LI"
+          value={draft.descricao_li}
+          onChange={(value) => onChange("descricao_li", value)}
+        />
+        <EditableTextArea
+          label="Descrição DUIMP"
+          value={draft.descricao_duimp}
+          onChange={(value) => onChange("descricao_duimp", value)}
+        />
+        <EditableTextArea
+          label="Perguntas obrigatórias"
+          value={listToEditableText(draft.perguntas_obrigatorias)}
+          onChange={(value) =>
+            onChange("perguntas_obrigatorias", editableTextToList(value))
+          }
+        />
+        <EditableTextArea
+          label="Falsos cognatos"
+          value={listToEditableText(draft.falsos_cognatos_alertados)}
+          onChange={(value) =>
+            onChange("falsos_cognatos_alertados", editableTextToList(value))
+          }
+        />
+        <EditableTextArea
+          label="Alertas"
+          value={listToEditableText(draft.alertas)}
+          onChange={(value) => onChange("alertas", editableTextToList(value))}
+        />
+      </div>
+    </div>
+  );
+}
+
+function EditableTextField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="space-y-1 text-xs font-medium">
+      <span>{label}</span>
+      <Input
+        className="h-8 text-xs"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </label>
+  );
+}
+
+function EditableTextArea({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="space-y-1 text-xs font-medium">
+      <span>{label}</span>
+      <Textarea
+        className="min-h-20 text-xs"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </label>
+  );
+}
+
+function EditableSelect({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: [string, string][];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="space-y-1 text-xs font-medium">
+      <span>{label}</span>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger className="h-8 text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map(([optionValue, label]) => (
+            <SelectItem key={optionValue} value={optionValue}>
+              {label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </label>
   );
 }
 

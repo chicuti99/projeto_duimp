@@ -1,4 +1,6 @@
 const MANUS_API_BASE_URL = "https://api.manus.ai/v2";
+const MANUS_DEFAULT_TIMEOUT_MS = 180_000;
+const MANUS_DEFAULT_POLL_INTERVAL_MS = 10_000;
 
 type ManusErrorResponse = {
   ok: false;
@@ -230,8 +232,8 @@ export async function runManusStructuredOutput<T>({
   prompt,
   schema,
   attachments = [],
-  timeoutMs = 180_000,
-  pollIntervalMs = 3_000,
+  timeoutMs = MANUS_DEFAULT_TIMEOUT_MS,
+  pollIntervalMs = MANUS_DEFAULT_POLL_INTERVAL_MS,
 }: RunManusStructuredOutputOptions): Promise<T> {
   const createResponse = await manusFetch<ManusTaskCreateResponse>(
     "/task.create",

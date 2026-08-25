@@ -1,6 +1,7 @@
 const MANUS_API_BASE_URL = "https://api.manus.ai/v2";
 const MANUS_DEFAULT_TIMEOUT_MS = 180_000;
 const MANUS_DEFAULT_POLL_INTERVAL_MS = 10_000;
+const MANUS_TASK_VISIBILITY_GRACE_MS = 30_000;
 
 type ManusErrorResponse = {
   ok: false;
@@ -126,6 +127,11 @@ export function createManusFallbackError(
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isManusTaskNotFoundError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /task not found/i.test(message);
 }
 
 async function parseManusResponse<T>(response: Response): Promise<T> {
@@ -260,6 +266,7 @@ export async function runManusStructuredOutput<T>({
 
   const deadline = Date.now() + timeoutMs;
   let sawStoppedAt: number | null = null;
+  const taskCreatedAt = Date.now();
 
   while (Date.now() < deadline) {
     const params = new URLSearchParams({
@@ -268,10 +275,23 @@ export async function runManusStructuredOutput<T>({
       limit: "200",
     });
 
-    const listResponse = await manusFetch<ManusListMessagesResponse>(
-      `/task.listMessages?${params.toString()}`,
-      { method: "GET" },
-    );
+    let listResponse: ManusListMessagesResponse;
+    try {
+      listResponse = await manusFetch<ManusListMessagesResponse>(
+        `/task.listMessages?${params.toString()}`,
+        { method: "GET" },
+      );
+    } catch (error) {
+      if (
+        isManusTaskNotFoundError(error) &&
+        Date.now() - taskCreatedAt < MANUS_TASK_VISIBILITY_GRACE_MS
+      ) {
+        await delay(pollIntervalMs);
+        continue;
+      }
+
+      throw error;
+    }
 
     if (!listResponse.ok) {
       throw new Error("Manus nao retornou as mensagens do fallback.");

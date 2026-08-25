@@ -93,14 +93,17 @@ export function isRecoverableGeminiError(error: unknown) {
     (typeof error === "object" &&
       error !== null &&
       "name" in error &&
-      (error as { name?: unknown }).name === "ZodError") ||
+      ((error as { name?: unknown }).name === "ZodError" ||
+        (error as { name?: unknown }).name === "AbortError")) ||
     status === 429 ||
     status === 503 ||
     status === 504 ||
     /RESOURCE_EXHAUSTED|UNAVAILABLE|DEADLINE_EXCEEDED/i.test(message) ||
     /\b(code|status)["':\s]+(429|503|504)\b/i.test(message) ||
     /quota|rate limit|limite de requisi/i.test(message) ||
-    /overload|sobrecarreg|timeout|timed out|deadline/i.test(message) ||
+    /overload|sobrecarreg|timeout|timed out|deadline|aborted|abortad/i.test(
+      message,
+    ) ||
     /resposta da ia retornou vazia/i.test(message)
   );
 }

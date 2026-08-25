@@ -35,6 +35,9 @@ const SUPPORTED_ATTACHMENT_MIME_TYPES = [
   "image/webp",
 ] as const;
 
+const GEMINI_TEXT_TIMEOUT_MS = 45_000;
+const GEMINI_ATTACHMENT_TIMEOUT_MS = 120_000;
+
 const AttachmentSchema = z.object({
   name: z.string().min(1).max(160),
   mimeType: z.enum(SUPPORTED_ATTACHMENT_MIME_TYPES),
@@ -431,13 +434,17 @@ export const classifyNcm = createServerFn({ method: "POST" })
       throw new Error("GEMINI_API_KEY não configurada");
     }
 
+    const geminiTimeoutMs = data.anexos.length
+      ? GEMINI_ATTACHMENT_TIMEOUT_MS
+      : GEMINI_TEXT_TIMEOUT_MS;
+
     // O SDK já reexecuta automaticamente em erros 429/5xx (até 2 vezes,
-    // por padrão) — não adicionamos retry por cima disso, só encurtamos
-    // o timeout de cada tentativa (padrão é 1 minuto) pra essa cadeia
-    // não passar de ~1,5 minuto no pior caso.
+    // por padrão). Mantemos a chamada curta para texto puro, mas damos
+    // mais tempo quando há PDFs/imagens porque a etapa de leitura visual
+    // costuma ultrapassar 30s.
     const ai = new GoogleGenAI({
       apiKey: GEMINI_API_KEY,
-      httpOptions: { timeout: 30_000 },
+      httpOptions: { timeout: geminiTimeoutMs },
     });
 
     // CORREÇÃO 2: Adicionamos comandos diretos no systemPrompt reforçando as regras do Zod
@@ -673,8 +680,15 @@ Gere sempre a estrutura de chaves acima para cada item de classificação. Nunca
           "O serviço de IA está sobrecarregado no momento. Tente novamente em instantes.",
         );
       }
-      throw new Error(
-        `Erro na classificação de NCM: ${error.message || error}`,
-      );
+      const message = String(error?.message || error);
+      if (/aborted|abortad|timeout|timed out|deadline/i.test(message)) {
+        throw new Error(
+          data.anexos.length
+            ? "Erro na classificação de NCM: a leitura dos anexos demorou mais que o esperado. Tente novamente ou envie um PDF/imagem mais enxuto, com apenas as páginas técnicas do produto."
+            : "Erro na classificação de NCM: a IA demorou mais que o esperado para responder. Tente novamente em instantes.",
+        );
+      }
+
+      throw new Error(`Erro na classificação de NCM: ${message}`);
     }
   });

@@ -398,6 +398,7 @@ function appendObservation(observacao: string, addition: string) {
 
 function batchItemToClassification(result: NcmBatchItem) {
   return {
+    ...result,
     ncm: result.ncm_sugerido,
     descricao: result.descricao_ncm,
     capitulo: result.capitulo,
@@ -412,6 +413,9 @@ function batchItemToClassification(result: NcmBatchItem) {
     observacoes: result.observacao,
     descricao_li: result.descricao_li,
     descricao_duimp: result.descricao_duimp,
+    perguntas_obrigatorias: result.perguntas_obrigatorias,
+    falsos_cognatos_alertados: result.falsos_cognatos_alertados,
+    alertas: result.alertas,
   };
 }
 
